@@ -20,6 +20,20 @@ namespace oa::render {
 
 RenderEngine::RenderEngine(oa::fs::IFileSystem* fs, oa::runtime::GameRuntime* rt) : fs_(fs), rt_(rt)
 {
+    // Asset-texture LRU budget (P1 §2.1-3): millimetres of GPU texture are
+    // the low-end-device constraint, so a default budget evicts the least
+    // recently used decoded asset textures; 0 disables eviction entirely
+    // (unlimited, the pre-P1 behaviour).
+    {
+        const char* mb = std::getenv("OA_TEX_BUDGET_MB");
+        const long v = mb && *mb ? std::strtol(mb, nullptr, 10) : 256;
+        tex_budget_bytes_ = v > 0 ? uint64_t(v) * 1024ull * 1024ull : 0;
+    }
+    // Async image decode (opt-in; see AsyncDecodeStats).
+    {
+        const char* v = std::getenv("OA_ASYNC_DECODE");
+        async_decode_ = v && *v == '1';
+    }
     fontSystem = std::make_unique<oa::render::FontSystem>(fs, rt);
     // 文本度量钩子：Lua get_fontsize → e:var system=get_message_layer_width/height
     // → interpreter hooks_.message_layer_metrics → FontSystem 排版测量。
@@ -48,6 +62,98 @@ RenderEngine::~RenderEngine()
 {
     // 成员析构序 = 声明逆序：fontSystem 先于 backend_ 销毁（字形纹理销毁时
     // 后端对象仍存活，见 renderer.h 成员注释）。
+    stop_decode_worker();
+}
+
+// ---------------------------------------------------------------------------
+// Async image decode worker (P1 §2.1). One thread; jobs carry their resolved
+// candidate VFS names so the worker never reads interpreter state. PhysFS
+// reads take the engine's global recursive lock, so worker and tick thread
+// interleave safely.
+// ---------------------------------------------------------------------------
+void RenderEngine::start_decode_worker()
+{
+    if (decode_worker_.joinable()) return;
+    decode_stop_ = false;
+    decode_worker_ = std::thread([this] { decode_worker_main(); });
+}
+
+void RenderEngine::stop_decode_worker()
+{
+    if (!decode_worker_.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lk(decode_mu_);
+        decode_stop_ = true;
+        decode_queue_.clear();
+    }
+    decode_cv_.notify_all();
+    decode_worker_.join();
+}
+
+void RenderEngine::decode_worker_main()
+{
+    for (;;) {
+        DecodeRequest req;
+        {
+            std::unique_lock<std::mutex> lk(decode_mu_);
+            decode_cv_.wait(lk, [this] { return decode_stop_ || !decode_queue_.empty(); });
+            if (decode_stop_) return;
+            req = std::move(decode_queue_.front());
+            decode_queue_.pop_front();
+        }
+        oa::media::Image img;
+        bool ok = false;
+        for (const std::string& cand : req.candidates) {
+            if (auto bytes = fs_->read(cand)) {
+                if (oa::media::decode_image(*bytes, img)) {
+                    ok = true;
+                    break;
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(decode_mu_);
+            if (ok) decode_done_.push_back({req.name, std::move(img)});
+            else decode_failed_names_.insert(req.name);
+        }
+    }
+}
+
+void RenderEngine::request_async_decode(const std::string& name,
+                                        std::vector<std::string> candidates)
+{
+    if (!async_decode_ || name.empty() || candidates.empty()) return;
+    start_decode_worker();
+    std::lock_guard<std::mutex> lk(decode_mu_);
+    if (decode_pending_.count(name)) return;
+    decode_pending_.insert(name);
+    decode_queue_.push_back(DecodeRequest{name, std::move(candidates)});
+    ++async_started_;
+    decode_cv_.notify_one();
+}
+
+void RenderEngine::drain_async_decodes()
+{
+    if (!async_decode_) return;
+    std::vector<std::pair<std::string, oa::media::Image>> done;
+    std::set<std::string> failed;
+    {
+        std::lock_guard<std::mutex> lk(decode_mu_);
+        done.swap(decode_done_);
+        failed.swap(decode_failed_names_);
+        for (const auto& [name, img] : done) decode_pending_.erase(name);
+        for (const auto& name : failed) decode_pending_.erase(name);
+    }
+    for (auto& [name, img] : done) {
+        decoded[name] = std::move(img);
+        ++async_completed_;
+        ++async_avoided_sync_; // this decode never ran on the tick thread
+        async_completion_ = true; // host forces one repaint
+    }
+    for (const auto& name : failed) {
+        decoded_miss_.insert(name);
+        ++async_failed_;
+    }
 }
 
 bool RenderEngine::create_renderer(SDL_Window* ctx,
@@ -150,6 +256,8 @@ void RenderEngine::release_all()
     emote_canvas_.clear();
     emote_atlases_.clear();
     textures.clear();
+    tex_use_.clear();
+    tex_bytes_ = 0;
     trans_capture_tex = nullptr;
     trans_rule_tex = nullptr; // rule texture lived in `textures` (destroyed above)
     trans_rule_checked_ = false;
@@ -800,6 +908,14 @@ const oa::media::Image* RenderEngine::resolve_image(const std::string& name)
     // ev/fg/cg/rule/title stay .png; exact filenames (raw `resolved`) always
     // win first, then .png, then .jpg (png-first keeps legacy archives —
     // fpm/NekoMiko, sole-.png bgs — byte-identical behavior).
+    // Async decode (OA_ASYNC_DECODE=1): hand the SAME candidate list to the
+    // worker, draw this frame without the image, and let the host force one
+    // repaint when the decode lands (decoded[] then serves the sync path).
+    if (async_decode_) {
+        if (decode_pending_.count(name)) return nullptr;
+        request_async_decode(name, {resolved, resolved + ".png", resolved + ".jpg"});
+        return nullptr;
+    }
     for (const std::string& cand : { resolved, resolved + ".png", resolved + ".jpg" }) {
         if (auto b = overlay_read(cand)) {
             bytes = b;
@@ -964,7 +1080,10 @@ TextureRef RenderEngine::texture_for_key(const oa::render::TextureKey& key)
 {
     if (key.empty()) return nullptr;
     const auto it = textures.find(key);
-    if (it != textures.end()) return it->second;
+    if (it != textures.end()) {
+        touch_asset_texture(key, it->second); // LRU: this frame used it
+        return it->second;
+    }
     // 只有资源文件域有解码回退;宿主供帧域(video/emote/overlay)由上传面
     // 填充缓存,缺失即"还没上传"(旧 textures-only 语义的域版本)。
     if (!key.is_asset()) return nullptr;
@@ -973,6 +1092,7 @@ TextureRef RenderEngine::texture_for_key(const oa::render::TextureKey& key)
     TextureRef tex = make_texture(*img);
     if (!tex) return nullptr;
     textures[key] = tex;
+    touch_asset_texture(key, tex);
     return tex;
 }
 
@@ -1286,6 +1406,12 @@ bool RenderEngine::group_path_required(const oa::render::Layer& l)
 void RenderEngine::render_beigin()
 {
     if (!backend_) return;
+    // Worker results land in the caches before this frame resolves anything.
+    drain_async_decodes();
+    // One frame boundary: LRU bookkeeping + eviction happen here, before any
+    // draw resolves a texture (so nothing evicted this frame is in flight).
+    ++frame_no_;
+    evict_asset_textures();
     if (stage_rt) {
         backend_->set_target(stage_rt);
         backend_->clear_clip();
@@ -1294,6 +1420,52 @@ void RenderEngine::render_beigin()
     backend_->clear();
     // per-frame glyph count (single paint point = node slot).
     frame_glyphs_ = 0;
+}
+
+void RenderEngine::touch_asset_texture(const oa::render::TextureKey& key,
+                                       TextureRef tex)
+{
+    if (!tex || !key.is_asset()) return;
+    float w = 0, h = 0;
+    if (!backend_ || !backend_->texture_size(tex, &w, &h)) return;
+    const uint64_t bytes = uint64_t(w > 0 ? w : 0) * uint64_t(h > 0 ? h : 0) * 4ull;
+    auto& use = tex_use_[key];
+    if (use.bytes != bytes) {
+        tex_bytes_ -= use.bytes;
+        tex_bytes_ += bytes;
+        use.bytes = bytes;
+    }
+    use.last_frame = frame_no_;
+}
+
+void RenderEngine::evict_asset_textures()
+{
+    if (!backend_ || tex_budget_bytes_ == 0 || tex_bytes_ <= tex_budget_bytes_) return;
+    // Candidates: asset textures untouched for at least one full frame and
+    // not owned by another cache (host-frame canvases are not asset keys).
+    std::vector<std::pair<uint64_t, oa::render::TextureKey>> candidates;
+    candidates.reserve(tex_use_.size());
+    for (const auto& [key, use] : tex_use_) {
+        if (use.last_frame + 1 >= frame_no_) continue; // used this/last frame
+        if (emote_canvas_.count(key)) continue;
+        candidates.push_back({use.last_frame, key});
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& [last, key] : candidates) {
+        if (tex_bytes_ <= tex_budget_bytes_) break;
+        const auto tit = textures.find(key);
+        const auto uit = tex_use_.find(key);
+        const uint64_t bytes = uit != tex_use_.end() ? uit->second.bytes : 0;
+        if (tit != textures.end()) {
+            backend_->destroy_texture(tit->second);
+            textures.erase(tit);
+        }
+        tex_bytes_ -= std::min(tex_bytes_, bytes);
+        tex_use_.erase(key);
+        ++tex_evictions_;
+        (void)last;
+    }
 }
 void RenderEngine::render_clear_tex_cache()
 {

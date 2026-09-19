@@ -24,6 +24,16 @@ if(OHOS)
   set(OA_HARMONY_LIB ON CACHE BOOL "" FORCE)
   set(OA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
   set(OA_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+  # Dynamic-symbol diet (P1 build item): the HarmonyOS host dlopen()s this
+  # library and only looks up the C entry points declared with
+  # __attribute__((visibility("default"))) in src/app/harmony/oa_harmony.cpp
+  # (runner_main / requestShutdown / cleanupSDL / getLastRubyError /
+  # get_last_ruby_error). Everything else — the whole C++ engine surface plus
+  # vendored lua/physfs — stays internal: fewer dynamic relocations, smaller
+  # .so, faster dlopen, and no accidental ABI surface.
+  set(CMAKE_C_VISIBILITY_PRESET hidden)
+  set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+  set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
   # 出厂性能：跨 TU LTO（docs/PERFORMANCE_OPTIMIZATION_PLAN.md §4）。
   # -O 级别由构建脚本 CMAKE_BUILD_TYPE=Release(-O3) 提供；不开 -ffast-math
   # （像素对照基线约束）。

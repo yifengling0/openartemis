@@ -4,6 +4,11 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <vector>
 #include <algorithm>
 
 #include "core/render/backend.h"
@@ -111,6 +116,42 @@ public:
     };
     GroupStats group_stats() const {
         return GroupStats{group_premul_bakes_, group_readback_bakes_};
+    }
+
+    /// Asset-texture cache census (P1 LRU): live asset textures, their GPU
+    /// bytes, and how many were evicted so far.
+    struct CacheStats {
+        uint64_t asset_textures = 0;
+        uint64_t asset_bytes = 0;
+        uint64_t evictions = 0;
+    };
+    CacheStats cache_stats() const {
+        return CacheStats{uint64_t(tex_use_.size()), tex_bytes_, tex_evictions_};
+    }
+
+    /// P1 async image decode (PERFORMANCE_PLAN §2.1). OFF by default: the
+    /// first frame that needs an undecoded asset draws without it while the
+    /// worker decodes (the classic trade the plan describes), which changes
+    /// the picture for 1..N frames — that must be validated against a real
+    /// pixel baseline before it becomes the default. OA_ASYNC_DECODE=1
+    /// enables it (OHOS/device runs: 1920x1080 PNG decode is 20-60 ms there).
+    /// `consume_completed()` tells the host to force one repaint after a
+    /// worker result landed in the cache.
+    struct AsyncDecodeStats {
+        uint64_t started = 0;    // requests handed to the worker
+        uint64_t completed = 0;  // decodes that landed in the cache
+        uint64_t failed = 0;
+        uint64_t avoided_sync = 0; // resolves served by a finished worker
+    };
+    bool async_decode_enabled() const { return async_decode_; }
+    bool consume_async_completion() {
+        const bool had = async_completion_;
+        async_completion_ = false;
+        return had;
+    }
+    AsyncDecodeStats async_decode_stats() const {
+        return AsyncDecodeStats{async_started_, async_completed_, async_failed_,
+                                async_avoided_sync_};
     }
 
     // Pixel-read canary: read the current render target (the stage offscreen
@@ -497,6 +538,55 @@ private:
     /// those that still paid it (identity vs filtered/masked plans).
     uint64_t group_premul_bakes_ = 0;
     uint64_t group_readback_bakes_ = 0;
+    // ---- asset-texture LRU (P1, PERFORMANCE_PLAN §2.1-3) --------------
+    // Only ASSET-domain textures (decoded project images) are tracked: host
+    // frames (video/emote/overlay canvases) are streaming uploads the host
+    // refreshes itself, and the bake/atlas/solid caches have their own
+    // lifetimes. `decoded` keeps the CPU pixels, so an evicted texture is
+    // re-created with one upload — pixel-identical, just later.
+    struct TextureUse {
+        uint64_t last_frame = 0;
+        uint64_t bytes = 0;
+    };
+    std::map<oa::render::TextureKey, TextureUse> tex_use_;
+    uint64_t tex_bytes_ = 0;
+    uint64_t frame_no_ = 0;
+    uint64_t tex_budget_bytes_ = 0; // 0 = unlimited (eviction off)
+    uint64_t tex_evictions_ = 0;
+    /// Mark an asset texture as used by the current frame (adds its size to
+    /// the tracked byte total on first sight / size change).
+    void touch_asset_texture(const oa::render::TextureKey& key, TextureRef tex);
+    /// Drop the least-recently-used asset textures (never one used this or
+    /// the previous frame) until the budget is met again.
+    void evict_asset_textures();
+    // ---- async image decode worker (P1 §2.1, OA_ASYNC_DECODE=1) ---------
+    struct DecodeRequest {
+        std::string name;                      // cache key
+        std::vector<std::string> candidates;   // resolved VFS names to try
+    };
+    bool async_decode_ = false;
+    bool async_completion_ = false;
+    uint64_t async_started_ = 0;
+    uint64_t async_completed_ = 0;
+    uint64_t async_failed_ = 0;
+    uint64_t async_avoided_sync_ = 0;
+    std::thread decode_worker_;
+    std::mutex decode_mu_;
+    std::condition_variable decode_cv_;
+    std::deque<DecodeRequest> decode_queue_;
+    std::set<std::string> decode_pending_;
+    std::vector<std::pair<std::string, oa::media::Image>> decode_done_;
+    std::set<std::string> decode_failed_names_;
+    bool decode_stop_ = false;
+    void start_decode_worker();
+    void stop_decode_worker();
+    void decode_worker_main();
+    /// Queue one asset decode (candidate VFS names already resolved on the
+    /// calling thread — the worker never touches interpreter state).
+    void request_async_decode(const std::string& name,
+                              std::vector<std::string> candidates);
+    /// Move worker results into the caches (frame start).
+    void drain_async_decodes();
     // glyphs painted at node slots this frame (diagnostics).
     size_t frame_glyphs_ = 0;
     // per-frame snapshot — scene node id → drawable message ids bound

@@ -81,9 +81,11 @@
 
 - **P1 性能批次**（`docs/PERFORMANCE_OPTIMIZATION_PLAN.md` 的剩余项）：已完成
   Profiler（计数 + tick 分相 + `OA_PROFILE`）、字形度量缓存、`intermediate_render`
-  组烘焙的 GPU 预乘直通（gzsq 实测上传 −98%、CPU −61%、末帧像素 0 差异）；
-  剩余：图片异步解码/预取、纹理淘汰、脏区渲染、视频 GPU 路径与解码预热、
-  `-fvisibility=hidden` 等构建开关。
+  组烘焙的 GPU 预乘直通（gzsq 实测上传 −98%、CPU −61%、末帧像素 0 差异）、
+  纹理 LRU 淘汰（`OA_TEX_BUDGET_MB`）、图片异步解码（`OA_ASYNC_DECODE=1`，
+  默认关待像素基线验证）、OHOS `-fvisibility=hidden`（`.so` 2.20→1.92MB）；
+  剩余：脏区渲染（damage rect，需先做驱动 back-buffer 语义实测）、视频 GPU
+  路径（YUV→GPU 转纹理需 shader 面）、`-mcpu` 目标 SoC 调优（保持通用基线）。
 - **P2 `tag.ini` 解析**：触发条件 = 出现某真包把立绘命令当对白/宏参数串用的证据；
   本机 4 包普查未命中。
 - **P2 自定义 shader（`lyshader`/HLSL 子集）**：触发条件 = 出现某真包实际使用 `lyshader` 且画面缺失的证据；

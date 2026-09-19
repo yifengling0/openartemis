@@ -23,12 +23,15 @@
 | §1.3 | 视频/E-mote 流式纹理 in-place 更新 | **部分**（GLES `update_texture` 已在；CPU 重上传路径仍存在） |
 | §1.2-3 | 绘制状态去重 | 未做 |
 | §2.1-2 | 图片**负缓存**（缺失名不再每帧重探测） | **已完成**（`decoded_miss_`） |
-| §2.1 | 图片异步解码 + 预取 | 未做 |
-| §2.1-3 | 纹理 LRU 淘汰 | 未做 |
+| §2.1 | 图片异步解码（默认关，`OA_ASYNC_DECODE=1` 开） | **已实现**：专用 worker 解码，命中/失败回填 `decoded`/`decoded_miss_`，完成即强制一帧重绘；见下方实测 |
+| §2.1-3 | 纹理 LRU 淘汰（GPU 资产纹理，预算 256MB，`OA_TEX_BUDGET_MB` 可调） | **已完成**：`RenderEngine::evict_asset_textures`（未用满则零开销；本机两包资产纹理仅 ~30MB，未触发淘汰） |
 | §3.1-2 | Lua GC 调优 | 未做 |
 | — | Profiler 计数（draw calls / batches / binds / 纹理新建 / 上传字节 / 图片解码次数与耗时 / 读字节）+ `OA_PROFILE` 5 s 差分 | **已完成**（`RenderStats`/`AssetStats` + main.cpp；`tools/real_game_smoke.ps1 -Profile` 落盘基线） |
 | — | 分段计时（逻辑/解释器/文本/合成各自的 ns 桶，x86/OHOS 上按需加） | 未做（当前计数面覆盖渲染/IO；脚本侧用现有 `OA_*` 诊断） |
 | — | 脏区渲染（damage rect + scissor + 局部上传） | 未做（P1，需先做驱动 back-buffer 语义实测） |
+| §4 | `-fvisibility=hidden`（OHOS 动态符号面收敛） | **已完成**：`.so` 2.20→1.92MB，内部 C++ dynsym 归零，5 个 dlsym 入口（runner_main / requestShutdown / cleanupSDL / getLastRubyError / get_last_ruby_error）保留 |
+| §4 | `-mcpu`/`-march` 目标 SoC 调优 | 未做（保持通用 arm64 基线：产物要在多机型分发，收益/风险不划算） |
+| §1.2-3 | 绘制状态去重 | **已完成**（GLES 侧 program/blend/scissor/viewport/uniform 均已缓存去重） |
 | — | **字形度量缓存**（(face,ppem,cp) → GlyphMeasure；布局每帧重排整页、绘制每字形都调 FreeType） | **已完成**（`FontSystem::GlyphMetricsKey` + `glyphs h/f m/f` 计数） |
 | §1.2 | **intermediate_render 组烘焙的全屏回读**（`glReadPixels` + 整幅 CPU 合成 + 重新上传，gzsq 实测 152–385 MB/s 上传/120 次纹理新建每秒） | **已完成**：参数为恒等的组走 GPU 预乘混合直通（`BlendMode::Premul`），不再回读；见下方 A/B 数据 |
 
@@ -76,6 +79,21 @@ premultiplied 混合写入），因此恒等参数组（无 color multiply/灰�
 layermode=over）可以直接用 `BlendMode::Premul` + rgb/alpha 双 mod 叠回主 target；
 缓存记 flavour（预乘 target vs 直接 RGBA bake），flavour 变化时重烘焙，避免两种
 纹理被错误混合。`OA_GROUP_PREMUL=0` 保留旧路径用于二分定位与旧像素基线复现。
+
+### 异步图片解码实测（tmny31，`--fps 60 --frames 600`）
+
+| 指标 | 同步（默认） | `OA_ASYNC_DECODE=1` |
+|---|---|---|
+| tick 线程 readMB/s | 0.1 | **0.0**（读盘与解码都移到 worker） |
+| async started / done / fail | 0/0/0 | 3/3/0 |
+| journal（luma/layers/drawn/layer_ev/text_ev/switch_ev/msg_lines） | 2.5/17/2/336/9/31/1 | 完全相同 |
+| 末帧像素 A/B | — | 4.7% 通道差异（同设置跑间噪声为 7.9%），即落在噪声内 |
+
+为什么默认关：异步路径会让"首次需要某张图的那 1..N 帧"先不出图（等 worker 完成
+后由 `consume_async_completion()` 强制重绘）。这个换法在 OHOS 上收益最大
+（1920×1080 PNG 解码 20–60ms），但会改变出图时序，必须在**真实像素基线**
+（FPM/NekoMiko 的 journey 套件）上验证后才适合改为默认。开关已就位，真机可用
+`OA_ASYNC_DECODE=1` 直接 A/B。
 
 ---
 

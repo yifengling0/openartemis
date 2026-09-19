@@ -348,6 +348,12 @@ struct ProfileSnapshot {
     uint64_t other_us = 0;
     uint64_t group_premul = 0;
     uint64_t group_readback = 0;
+    uint64_t asset_textures = 0;
+    uint64_t asset_bytes = 0;
+    uint64_t asset_evictions = 0;
+    uint64_t async_started = 0;
+    uint64_t async_completed = 0;
+    uint64_t async_failed = 0;
     Uint64 ms = 0;
 };
 
@@ -379,6 +385,16 @@ static ProfileSnapshot profile_snapshot(const AppState* state) {
             state->oaRender->group_stats();
         s.group_premul = gs.premul;
         s.group_readback = gs.readback;
+        const oa::render::RenderEngine::CacheStats cs =
+            state->oaRender->cache_stats();
+        s.asset_textures = cs.asset_textures;
+        s.asset_bytes = cs.asset_bytes;
+        s.asset_evictions = cs.evictions;
+        const oa::render::RenderEngine::AsyncDecodeStats asd =
+            state->oaRender->async_decode_stats();
+        s.async_started = asd.started;
+        s.async_completed = asd.completed;
+        s.async_failed = asd.failed;
     }
     {
         const oa::runtime::GameRuntime::TickProfile& tp = state->rt->tick_profile();
@@ -404,7 +420,9 @@ static void profile_report(const AppState* state, const ProfileSnapshot& prev,
         "binds/f=%.1f | tex=%llu uploads/f=%.1f upMB/s=%.1f | "
         "decode/f=%.1f decode_ms/f=%.1f readMB/s=%.1f miss=%llu | "
         "glyphs h/f=%.1f m/f=%.1f | tick/f=%.2fms script=%.2fms content=%.2fms "
-        "other=%.2fms | groups premul/f=%.2f readback/f=%.2f | layers=%zu\n",
+        "other=%.2fms | groups premul/f=%.2f readback/f=%.2f | "
+        "assets tex=%llu MB=%.1f evict=%llu | "
+        "async dec started=%llu done=%llu fail=%llu | layers=%zu\n",
         dt_s, (unsigned long long)df, double(df) / dt_s,
         per(cur.draws, prev.draws), per(cur.batches, prev.batches),
         per(cur.binds, prev.binds), (unsigned long long)(cur.textures - prev.textures),
@@ -421,6 +439,12 @@ static void profile_report(const AppState* state, const ProfileSnapshot& prev,
         per(cur.other_us, prev.other_us) / 1000.0,
         per(cur.group_premul, prev.group_premul),
         per(cur.group_readback, prev.group_readback),
+        (unsigned long long)cur.asset_textures,
+        double(cur.asset_bytes) / (1024.0 * 1024.0),
+        (unsigned long long)cur.asset_evictions,
+        (unsigned long long)cur.async_started,
+        (unsigned long long)cur.async_completed,
+        (unsigned long long)cur.async_failed,
         state->rt ? state->rt->scene().size() : 0);
     std::fflush(stdout);
 }
@@ -2320,7 +2344,11 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // presented image —  last_submitted_frame logic) --
     static bool s_rendered_any = false;
     // window resize/expose events force one repaint at the new size.
-    const bool repaint_requested = state->force_repaint;
+    // An async image decode that just landed also forces exactly one repaint
+    // (OA_ASYNC_DECODE=1): this frame's draw already ran without the image,
+    // so the scene has to be presented again to show it.
+    const bool async_landed = state->oaRender && state->oaRender->consume_async_completion();
+    const bool repaint_requested = state->force_repaint || async_landed;
     state->force_repaint = false;
     if (frame_dirty || !s_rendered_any || repaint_requested) {
         crash_note(state, "draw");
