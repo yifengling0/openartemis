@@ -95,9 +95,25 @@ struct BackendInfo {
 /// 渲染后端接口。方法 = RenderEngine/render.cpp 真实调用面的最小投影，
 /// 语义 = SDL_Render 状态机原语（"当前 target/当前 clip/当前 draw
 /// 色与混合"都是后端内部状态，与 SDL 一致）；sdl 实现逐条转发。
+/// 呈现/IO 计数器（P1 profiler，docs/PERFORMANCE_OPTIMIZATION_PLAN.md
+/// "可测量优先"）：单调累加，宿主按差分打印；后端实现负责在各原语入口
+/// 增一。放进基类是为了两条后端线（sdl / gles）给出同一组数字。
+struct RenderStats {
+    uint64_t draw_calls = 0;       // 提交的图元（纹理矩形/纯色/几何）
+    uint64_t batches = 0;          // 合批 flush 次数
+    uint64_t texture_binds = 0;    // 纹理绑定次数
+    uint64_t texture_uploads = 0;  // 整幅/子区域像素上传次数
+    uint64_t upload_bytes = 0;     // 上传字节数
+    uint64_t textures_created = 0; // 新建纹理对象数
+    uint64_t presents = 0;         // SwapWindow 次数
+};
+
 class RenderBackend {
 public:
     virtual ~RenderBackend() = default;
+
+    /// Monotonic counters since backend creation (host prints deltas).
+    const RenderStats& stats() const { return stats_; }
 
     /// 在窗口上创建渲染器并安装 letterbox 逻辑呈现（stage 尺寸）。
     /// 失败返回 false（last_error() 有详情）。成功填充 info。
@@ -193,6 +209,9 @@ public:
         if (h) *h = 0;
         return false;
     }
+
+protected:
+    RenderStats stats_;
 };
 
 } // namespace oa::render

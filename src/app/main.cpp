@@ -312,6 +312,114 @@ static void print_status(AppState* state) {
     std::fflush(stdout);
 };
 
+// ---------------------------------------------------------------------------
+// Frame profiler (P1 "可测量优先", docs/PERFORMANCE_OPTIMIZATION_PLAN.md).
+//
+// OA_PROFILE=1 makes every status beat print one fixed-format line of DELTAS
+// since the previous beat, so a real-game run yields the numbers the plan's
+// acceptance criteria ask for (draw calls / uploads / decode time) without a
+// debugger attached:
+//
+//   [prof] dt=5.0s frames=300 fps=60.0 | draws/f=12.4 batches/f=8.1 binds/f=3.2
+//          | tex=f  uploads/f=9.0 upMB/s=14.2 | decode/f=1.2 decode_ms/f=18.4
+//          readMB/s=22.1 miss=0 | layers=75
+//
+// Counters come from the render backend (backend.h RenderStats) and the
+// renderer's asset face (RenderEngine::AssetStats).
+// ---------------------------------------------------------------------------
+struct ProfileSnapshot {
+    uint64_t frames = 0;
+    uint64_t draws = 0;
+    uint64_t batches = 0;
+    uint64_t binds = 0;
+    uint64_t textures = 0;
+    uint64_t uploads = 0;
+    uint64_t upload_bytes = 0;
+    uint64_t presents = 0;
+    uint64_t decodes = 0;
+    uint64_t decode_ms = 0;
+    uint64_t read_bytes = 0;
+    uint64_t misses = 0;
+    Uint64 ms = 0;
+};
+
+static ProfileSnapshot profile_snapshot(const AppState* state) {
+    ProfileSnapshot s;
+    if (!state->rt) return s;
+    s.frames = state->frames;
+    s.ms = SDL_GetTicks();
+    if (state->oaRender) {
+        const oa::render::RenderStats& rs = state->oaRender->render_stats();
+        s.draws = rs.draw_calls;
+        s.batches = rs.batches;
+        s.binds = rs.texture_binds;
+        s.textures = rs.textures_created;
+        s.uploads = rs.texture_uploads;
+        s.upload_bytes = rs.upload_bytes;
+        s.presents = rs.presents;
+        const oa::render::RenderEngine::AssetStats& as =
+            state->oaRender->asset_stats();
+        s.decodes = as.image_decodes;
+        s.decode_ms = as.decode_ms;
+        s.read_bytes = as.read_bytes;
+        s.misses = as.misses;
+    }
+    return s;
+}
+
+static void profile_report(const AppState* state, const ProfileSnapshot& prev,
+                           const ProfileSnapshot& cur) {
+    const double dt_s = double(cur.ms - prev.ms) / 1000.0;
+    if (dt_s <= 0.0) return;
+    const uint64_t df = cur.frames - prev.frames;
+    const double per_frame = df > 0 ? 1.0 / double(df) : 0.0;
+    auto per = [&](uint64_t now, uint64_t before) {
+        return double(now - before) * per_frame;
+    };
+    std::printf(
+        "[prof] dt=%.1fs frames=%llu fps=%.1f | draws/f=%.1f batches/f=%.1f "
+        "binds/f=%.1f | tex=%llu uploads/f=%.1f upMB/s=%.1f | "
+        "decode/f=%.1f decode_ms/f=%.1f readMB/s=%.1f miss=%llu | layers=%zu\n",
+        dt_s, (unsigned long long)df, double(df) / dt_s,
+        per(cur.draws, prev.draws), per(cur.batches, prev.batches),
+        per(cur.binds, prev.binds), (unsigned long long)(cur.textures - prev.textures),
+        per(cur.uploads, prev.uploads),
+        double(cur.upload_bytes - prev.upload_bytes) / (1024.0 * 1024.0) / dt_s,
+        per(cur.decodes, prev.decodes), per(cur.decode_ms, prev.decode_ms),
+        double(cur.read_bytes - prev.read_bytes) / (1024.0 * 1024.0) / dt_s,
+        (unsigned long long)(cur.misses - prev.misses),
+        state->rt ? state->rt->scene().size() : 0);
+    std::fflush(stdout);
+}
+
+/// One profiler beat: no-op unless OA_PROFILE is set. Keeps its own previous
+/// snapshot in a function-local static (one process = one run).
+static ProfileSnapshot g_profile_start;
+static bool g_profile_started = false;
+
+/// Capture the steady-state baseline (called once the project has booted, so
+/// load-time decoding is not billed to the first beat).
+static void profile_begin(const AppState* state) {
+    if (!std::getenv("OA_PROFILE")) return;
+    g_profile_start = profile_snapshot(state);
+    g_profile_started = true;
+}
+
+static void profile_beat(const AppState* state) {
+    static const bool enabled = std::getenv("OA_PROFILE") != nullptr;
+    if (!enabled) return;
+    static ProfileSnapshot prev;
+    static bool have_prev = false;
+    if (!have_prev) {
+        prev = g_profile_started ? g_profile_start : profile_snapshot(state);
+        have_prev = true;
+    }
+    const ProfileSnapshot cur = profile_snapshot(state);
+    if (cur.ms - prev.ms < 1000) return;   // at most one line per second
+    profile_report(state, prev, cur);
+    prev = cur;
+}
+
 // Last-step breadcrumb next to the exe. Heap smash (0xC0000374) will not
 // unwind C++ catch; this file is unbuffered so the last Lua/tick/draw
 // phase survives the process dying.
@@ -940,6 +1048,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     std::printf("[app] project booted; %s\n",
         state->opt.headless ? "headless: driving GameRuntime with virtual 16ms ticks"
         : "rendering Lua layer events");
+    profile_begin(state);  // OA_PROFILE steady-state baseline
 
     if (state->opt.headless) {
         // No pixels exist headless: complete the capture immediately so a
@@ -1070,6 +1179,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
                 .count() >= 5000) {
                 last_status = now;
                 print_status(state);
+                profile_beat(state);
             }
             if (state->opt.frames_target > 0 && state->frames >= state->opt.frames_target) {
                 // headless end-of-run stats (no pixels, so no luma snapshot)
@@ -2265,12 +2375,23 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 #endif
     // default continuous mode (no --frames): ~5 s status heartbeat so it
     // is easy to see where the game is parked (frame / wait / layers).
+    // OA_PROFILE beats fire on the same 5 s cadence in BOTH modes (a bounded
+    // --frames profiling run is the common case).
+    if (state->opt.frames_target != 0) {
+        const Uint64 now_pf = SDL_GetTicks();
+        if (state->last_profile_ms == 0) state->last_profile_ms = now_pf;
+        if (now_pf - state->last_profile_ms >= 5000) {
+            state->last_profile_ms = now_pf;
+            profile_beat(state);
+        }
+    }
     if (state->opt.frames_target == 0) {
         const Uint64 now_hb = SDL_GetTicks();
         if (state->last_status_ms == 0) state->last_status_ms = now_hb;
         if (now_hb - state->last_status_ms >= 5000) {
             state->last_status_ms = now_hb;
             print_status(state);
+            profile_beat(state);
             // the audio latency heartbeat. The queued level of
             // a bound device stream IS the audible delay, so this samples it
             // every status beat — the real-machine number for "is the sound

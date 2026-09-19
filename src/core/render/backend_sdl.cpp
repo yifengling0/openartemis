@@ -175,6 +175,7 @@ void SdlRenderBackend::clear()
 
 void SdlRenderBackend::fill_rect(const FRect& dst)
 {
+    ++stats_.draw_calls;
     const SDL_FRect r{dst.x, dst.y, dst.w, dst.h};
     SDL_RenderFillRect(renderer_, &r);
 }
@@ -182,6 +183,8 @@ void SdlRenderBackend::fill_rect(const FRect& dst)
 void SdlRenderBackend::draw_texture(TextureRef t, const FRect* src,
                                     const FRect* dst)
 {
+    ++stats_.draw_calls;
+    ++stats_.texture_binds;
     const SDL_FRect s_sdl = src ? SDL_FRect{src->x, src->y, src->w, src->h}
                                 : SDL_FRect{0, 0, 0, 0};
     const SDL_FRect d_sdl = dst ? SDL_FRect{dst->x, dst->y, dst->w, dst->h}
@@ -194,6 +197,8 @@ void SdlRenderBackend::draw_texture_affine(TextureRef t, const FRect* src,
                                            const FPoint& o, const FPoint& r,
                                            const FPoint& d)
 {
+    ++stats_.draw_calls;
+    ++stats_.texture_binds;
     const SDL_FRect s_sdl = src ? SDL_FRect{src->x, src->y, src->w, src->h}
                                 : SDL_FRect{0, 0, 0, 0};
     const SDL_FPoint sdl_o{o.x, o.y}, sdl_r{r.x, r.y}, sdl_d{d.x, d.y};
@@ -206,6 +211,8 @@ void SdlRenderBackend::draw_geometry(TextureRef t, const Vertex* verts,
                                      int nindices)
 {
     if (nverts <= 0 || !verts) return;
+    ++stats_.draw_calls;
+    ++stats_.texture_binds;
     std::vector<SDL_Vertex> sdl_verts;
     sdl_verts.reserve(size_t(nverts));
     for (int i = 0; i < nverts; ++i) {
@@ -222,6 +229,7 @@ void SdlRenderBackend::draw_geometry(TextureRef t, const Vertex* verts,
 
 void SdlRenderBackend::present()
 {
+    ++stats_.presents;
     SDL_RenderPresent(renderer_);
 }
 
@@ -230,6 +238,7 @@ TextureRef SdlRenderBackend::create_texture(int w, int h, TextureAccess access)
     SDL_Texture* tex = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32,
                                          to_sdl_access(access), w, h);
     if (!tex) return nullptr;
+    ++stats_.textures_created;
     SdlTexture* wrap_tex = new SdlTexture(tex);
     registry_[tex] = wrap_tex;
     return wrap_tex;
@@ -249,6 +258,7 @@ void SdlRenderBackend::destroy_texture(TextureRef t)
 void SdlRenderBackend::update_texture(TextureRef t, const uint8_t* rgba,
                                       int pitch)
 {
+    ++stats_.texture_uploads;
     SDL_UpdateTexture(sdl_tex(t), nullptr, rgba, pitch);
 }
 
@@ -258,6 +268,8 @@ bool SdlRenderBackend::update_texture_region(TextureRef t, int x, int y,
 {
     SDL_Texture* tex = sdl_tex(t);
     if (!tex || !rgba || w <= 0 || h <= 0) return false;
+    ++stats_.texture_uploads;
+    stats_.upload_bytes += uint64_t(w) * uint64_t(h) * 4ull;
     const SDL_Rect r{ x, y, w, h };
     return SDL_UpdateTexture(tex, &r, rgba, pitch);
 }

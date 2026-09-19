@@ -127,6 +127,9 @@ struct AppState
     // In default continuous mode (no --frames) print a status heartbeat every
     // ~5 s; finite --frames runs keep the legacy milestone prints instead.
     Uint64 last_status_ms = 0;
+    /// OA_PROFILE beat clock (independent of the status heartbeat so a
+    /// bounded --frames run still emits profiler lines).
+    Uint64 last_profile_ms = 0;
     std::set<int> kbd_down; // held physical keys -> vk (real keyboard; Ctrl…)
     std::set<int> mouse_held; // held mouse buttons -> vk (1 left / 2 right / 3 middle)
 

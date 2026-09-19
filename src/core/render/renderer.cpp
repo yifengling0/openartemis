@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 
 #include <SDL3/SDL_video.h> // create_renderer 诊断打印的窗口尺寸查询（仅此）
 
@@ -740,17 +741,33 @@ const oa::media::Image* RenderEngine::resolve_image(const std::string& name)
     }
     if (!bytes) {
         decoded_miss_.insert(name);
+        ++asset_stats_.misses;
         return nullptr;
     }
+    asset_stats_.read_bytes += bytes->size();
     oa::media::Image img;
+    const auto t_decode0 = std::chrono::steady_clock::now();
     if (!oa::media::decode_image(*bytes, img)) {
+        asset_stats_.decode_ms += uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t_decode0).count());
+        ++asset_stats_.image_decodes;
         decoded_miss_.insert(name);
+        ++asset_stats_.misses;
         return nullptr;
     }
+    asset_stats_.decode_ms += uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t_decode0).count());
+    ++asset_stats_.image_decodes;
     decoded[name] = std::move(img);
     std::printf("[app] texture: %s (%dx%d)\n", resolved.c_str(), decoded[name].w,
         decoded[name].h);
     return &decoded[name];
+}
+
+const oa::render::RenderStats& RenderEngine::render_stats() const
+{
+    static const oa::render::RenderStats kEmpty{};
+    return backend_ ? backend_->stats() : kEmpty;
 }
 
 bool RenderEngine::emote_render_parts(const oa::render::TextureKey& key,

@@ -79,6 +79,20 @@ public:
         return fontSystem && fontSystem->set_font_override(logical_path);
     }
 
+    /// Backend presentation/IO counters (P1 profiler; see backend.h).
+    const oa::render::RenderStats& render_stats() const;
+
+    /// Asset-side counters: image decodes that ran on the caller's thread and
+    /// their wall time, plus the bytes read out of the virtual filesystem.
+    /// Their growth is the tick-thread stall budget a scene switch pays.
+    struct AssetStats {
+        uint64_t image_decodes = 0;  // decode_image() calls
+        uint64_t decode_ms = 0;      // accumulated wall time
+        uint64_t read_bytes = 0;     // bytes served by the filesystem
+        uint64_t misses = 0;         // negatively cached (missing asset) names
+    };
+    const AssetStats& asset_stats() const { return asset_stats_; }
+
     // Pixel-read canary: read the current render target (the stage offscreen
     // target — always stage-sized and window-size
     // independent) and return its luma.
@@ -395,6 +409,8 @@ private:
 	// 负缓存：resolve_image 探测/解码失败的名字（生命周期同 decoded——
 	// 两者都不淘汰；资产集合运行期不变）。
 	std::set<std::string> decoded_miss_;
+	// Profiler counters (see asset_stats()): tick-thread decode cost.
+	AssetStats asset_stats_;
 	// 纹理缓存按 TextureKey 域分桶 —— 资源文件(Asset)与
 	// 宿主供帧(VideoFrame/EmoteCanvas/OverlayFrame)结构性分开,撞名不可能,
 	// 不再需要保留命名空间拼写。

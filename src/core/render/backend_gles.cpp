@@ -1065,6 +1065,7 @@ void GlesRenderBackend::apply_draw_state(const GlesTexture* tex, BlendMode blend
 void GlesRenderBackend::batch_append(const GlesTexture* tex, BlendMode blend,
                                      const GLfloat_* verts, int nverts)
 {
+    ++stats_.draw_calls;  // one submitted primitive (batched or not)
     const bool key_match = batch_key_valid_ && batch_tex_ == tex &&
         batch_blend_ == blend && batch_clip_on_ == clip_enabled_ &&
         (!clip_enabled_ ||
@@ -1086,6 +1087,7 @@ void GlesRenderBackend::batch_append(const GlesTexture* tex, BlendMode blend,
 void GlesRenderBackend::flush_batch()
 {
     if (batch_.empty()) return;
+    ++stats_.batches;
     if (!gl_context_) { // shutdown 后的尾调用：丢弃即可
         batch_.clear();
         batch_key_valid_ = false;
@@ -1097,6 +1099,7 @@ void GlesRenderBackend::flush_batch()
         if (gl_bound_tex_ != batch_tex_->tex) {
             glBindTexture(GL_TEXTURE_2D_, batch_tex_->tex);
             gl_bound_tex_ = batch_tex_->tex;
+            ++stats_.texture_binds;
         }
         if (gl_usetex_ != 1) {
             glUniform1i(loc_usetex_, 1);
@@ -1306,6 +1309,7 @@ bool GlesRenderBackend::draw_rule_transition(TextureRef capture,
 void GlesRenderBackend::present()
 {
     if (!gl_context_) return;
+    ++stats_.presents;
     flush_batch();
     ensure_window_ready();
     // GL 错误 canary（OA_RENDER_DIAG 的后端错误面）：仅诊断开关打开时
@@ -1337,6 +1341,7 @@ TextureRef GlesRenderBackend::create_texture(int w, int h,
     gt->h = h;
     gt->access = access;
     glGenTextures(1, &gt->tex);
+    ++stats_.textures_created;
     glBindTexture(GL_TEXTURE_2D_, gt->tex);
     gl_bound_tex_ = gt->tex;
     glTexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA8_, w, h, 0, GL_RGBA_,
@@ -1398,6 +1403,8 @@ void GlesRenderBackend::update_texture(TextureRef t, const uint8_t* rgba,
     if (batch_tex_ == gt) flush_batch(); // 排队绘制引用旧内容，先落地
     const int row_bytes = gt->w * 4;
     if (pitch < row_bytes) return;
+    ++stats_.texture_uploads;
+    stats_.upload_bytes += uint64_t(gt->w) * uint64_t(gt->h) * 4ull;
     glBindTexture(GL_TEXTURE_2D_, gt->tex);
     gl_bound_tex_ = gt->tex;
     glPixelStorei(GL_UNPACK_ALIGNMENT_, 1);
@@ -1420,6 +1427,8 @@ bool GlesRenderBackend::update_texture_region(TextureRef t, int x, int y,
     if (batch_tex_ == gt) flush_batch();
     const int row_bytes = w * 4;
     if (pitch < row_bytes) return false;
+    ++stats_.texture_uploads;
+    stats_.upload_bytes += uint64_t(w) * uint64_t(h) * 4ull;
     glBindTexture(GL_TEXTURE_2D_, gt->tex);
     gl_bound_tex_ = gt->tex;
     glPixelStorei(GL_UNPACK_ALIGNMENT_, 1);

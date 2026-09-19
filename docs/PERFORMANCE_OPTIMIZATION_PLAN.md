@@ -22,11 +22,24 @@
 | §3.1-1 | 逻辑帧率封顶 60Hz（高刷面板） | **已完成**（`pace_windowed_frame` 在 OHOS 生效） |
 | §1.3 | 视频/E-mote 流式纹理 in-place 更新 | **部分**（GLES `update_texture` 已在；CPU 重上传路径仍存在） |
 | §1.2-3 | 绘制状态去重 | 未做 |
-| §2.1 | 图片异步解码 + 预取 + 负缓存 | 未做 |
+| §2.1-2 | 图片**负缓存**（缺失名不再每帧重探测） | **已完成**（`decoded_miss_`） |
+| §2.1 | 图片异步解码 + 预取 | 未做 |
 | §2.1-3 | 纹理 LRU 淘汰 | 未做 |
 | §3.1-2 | Lua GC 调优 | 未做 |
-| — | 分段 Profiler（逻辑/解释器/合成/上传/提交/呈现 + draw calls/上传字节） | 未做（P1 第一批：先可测量再优化） |
+| — | Profiler 计数（draw calls / batches / binds / 纹理新建 / 上传字节 / 图片解码次数与耗时 / 读字节）+ `OA_PROFILE` 5 s 差分 | **已完成**（`RenderStats`/`AssetStats` + main.cpp；`tools/real_game_smoke.ps1 -Profile` 落盘基线） |
+| — | 分段计时（逻辑/解释器/文本/合成各自的 ns 桶，x86/OHOS 上按需加） | 未做（当前计数面覆盖渲染/IO；脚本侧用现有 `OA_*` 诊断） |
 | — | 脏区渲染（damage rect + scissor + 局部上传） | 未做（P1，需先做驱动 back-buffer 语义实测） |
+
+基线采集：
+
+```powershell
+# 每个真包跑 1200 帧，prof 行与完整日志写到 <save>/<game>/profile.log
+.\tools\real_game_smoke.ps1 -Frames 1200 -Profile -KeepSaveRoot -Game `
+  'D:\Games\Pomelo\Ar_枫笛_脏翅膀_od\root.pfs','D:\Games\Pomelo\jianyu\root.pfs'
+
+# 单包窗口线（有像素数据，OHOS 真机同构）：--fps 30 时跑满 5 s 即有 prof 行
+OA_PROFILE=1 ./build_sdl2/src/app/openartemis --fps 30 --frames 200 <game>/root.pfs
+```
 
 ---
 

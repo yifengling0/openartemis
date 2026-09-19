@@ -20,6 +20,8 @@ param(
 
     [string]$SaveRoot = '',
 
+    [switch]$Profile,
+
     [switch]$KeepSaveRoot
 )
 
@@ -76,7 +78,18 @@ foreach ($game in $Game) {
     New-Item -ItemType Directory -Force -Path $gameSave | Out-Null
 
     $env:OA_SAVE_ROOT = $gameSave
+    if ($Profile) { $env:OA_PROFILE = '1' } else { Remove-Item Env:OA_PROFILE -ErrorAction SilentlyContinue }
     $log = & $exe --headless --frames $Frames $game 2>&1 | Out-String
+
+    if ($Profile) {
+        $logFile = Join-Path $gameSave 'profile.log'
+        Set-Content -LiteralPath $logFile -Value $log -Encoding UTF8
+        $lines = ($log -split "`n") | Where-Object { $_ -match '^\[prof\]' }
+        if ($lines) {
+            Write-Host "----- $name profile -----"
+            $lines | Select-Object -Last 3 | ForEach-Object { Write-Host $_ }
+        }
+    }
 
     $hit = $null
     foreach ($p in $failPatterns) {
