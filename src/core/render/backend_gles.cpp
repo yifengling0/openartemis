@@ -972,6 +972,12 @@ void GlesRenderBackend::apply_draw_state(const GlesTexture* tex, BlendMode blend
                 case BlendMode::Mod:
                     glBlendFuncSeparate(GL_ZERO_, GL_SRC_COLOR_, GL_ZERO_, GL_ONE_);
                     break;
+                case BlendMode::Premul:
+                    // 源已是预乘 alpha：rgb 直接相加，dst 按 1-src.a 衰减
+                    // （组 target 的像素由离屏 pass 的预乘混合写出）。
+                    glBlendFuncSeparate(GL_ONE_, GL_ONE_MINUS_SRC_ALPHA_,
+                                        GL_ONE_, GL_ONE_MINUS_SRC_ALPHA_);
+                    break;
                 case BlendMode::None: break;
             }
             glBlendEquation(GL_FUNC_ADD_);

@@ -63,7 +63,14 @@ struct RgbaF {
 
 /// 引擎实际使用的混合语义子集（layermode: add/additive、screen≈blend、
 /// multiply→mod；其余一律 blend；NONE 仅离屏清屏用）。
-enum class BlendMode { None, Blend, Add, Mod };
+///
+/// `Premul` = 预乘 alpha 源（src.rgb 已含 alpha）：glBlendFuncSeparate
+/// (ONE, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA) / SDL_BLENDMODE_
+/// PREMULTIPLIED。离屏组 target 的像素就是预乘的（离屏 pass 用 GLES 的
+/// premultiplied alpha 混合写入），因此"参数为恒等的 intermediate_render
+/// 组"可以直接把 target 当组合纹理用预乘混合叠回，省掉整幅回读 + CPU
+/// un-premultiply + 重新上传（PERFORMANCE_PLAN §1.2）。
+enum class BlendMode { None, Blend, Add, Mod, Premul };
 
 /// 纹理创建方式（与引擎三种用法一一对应：静态贴图/流式逐帧刷新/离屏
 /// target）。

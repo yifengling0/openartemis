@@ -102,6 +102,17 @@ public:
     };
     FontCacheStats font_cache_stats() const;
 
+    /// Profiler: intermediate_render group composites (P1). `premul` skipped
+    /// the full-screen readback via the premultiplied GPU path; `readback`
+    /// are the filtered/masked plans that still need the CPU composite.
+    struct GroupStats {
+        uint64_t premul = 0;
+        uint64_t readback = 0;
+    };
+    GroupStats group_stats() const {
+        return GroupStats{group_premul_bakes_, group_readback_bakes_};
+    }
+
     // Pixel-read canary: read the current render target (the stage offscreen
     // target — always stage-sized and window-size
     // independent) and return its luma.
@@ -381,6 +392,17 @@ private:
     /// restore the caller's clip.
     void composite_group_bake(TextureRef baked, const GroupPlan& p,
                               bool had_clip, const IRect& old_clip);
+    /// GPU-only composite for a group whose plan is a pure "over": the group
+    /// target already holds premultiplied RGBA, so it is drawn straight back
+    /// with BlendMode::Premul (rgb and alpha both scaled by group alpha)
+    /// instead of readback + CPU un-premultiply + re-upload.
+    void composite_group_bake_premul(TextureRef target, const GroupPlan& p,
+                                     bool had_clip, const IRect& old_clip);
+    /// True when the CPU composite in group_composite_cpu() would only
+    /// un-premultiply (no color multiply / grayscale / negative / mask) and
+    /// the layermode is plain over — the precondition of the premultiplied
+    /// fast path above.
+    static bool group_plan_is_identity_composite(const GroupPlan& p);
     /// Enter the offscreen target session: set target, clear transparent,
     /// apply the group clip; returns the previous target to restore in
     /// end_offscreen_pass.
@@ -466,6 +488,15 @@ private:
     // group alpha — applied via alpha-mod at draw time so alpha tweens are
     // cheap); invalidated whenever any scene mutation / animation ran.
     std::map<std::string, TextureRef> group_tex_cache;
+    /// Flavour of each cached group texture: true = premultiplied TARGET
+    /// (identity plan, no readback), false = straight-RGBA uploaded bake.
+    /// A plan that changes flavour without invalidating the cache forces a
+    /// re-bake (the two must never be composited with the other's blend).
+    std::map<std::string, bool> group_tex_premul_;
+    /// Profiler counters: group composites that skipped the readback vs
+    /// those that still paid it (identity vs filtered/masked plans).
+    uint64_t group_premul_bakes_ = 0;
+    uint64_t group_readback_bakes_ = 0;
     // glyphs painted at node slots this frame (diagnostics).
     size_t frame_glyphs_ = 0;
     // per-frame snapshot — scene node id → drawable message ids bound

@@ -146,6 +146,7 @@ void RenderEngine::release_all()
     for (auto& [k, t] : group_tex_cache)
         if (t) backend_->destroy_texture(t);
     group_tex_cache.clear();
+    group_tex_premul_.clear();
     emote_canvas_.clear();
     emote_atlases_.clear();
     textures.clear();
@@ -471,6 +472,44 @@ void RenderEngine::composite_group_bake(TextureRef baked, const GroupPlan& p,
     restore_render_clip(had_clip, old_clip);
 }
 
+bool RenderEngine::group_plan_is_identity_composite(const GroupPlan& p) {
+    // A/B arm: OA_GROUP_PREMUL=0 keeps the historical readback + CPU
+    // composite for every group (used to bisect a visual difference, and to
+    // reproduce the pre-P1 pixel baselines without rebuilding).
+    static const bool enabled = [] {
+        const char* v = std::getenv("OA_GROUP_PREMUL");
+        return !(v && *v == '0');
+    }();
+    if (!enabled) return false;
+    // Only the plain "over" layermode can be expressed with premultiplied
+    // blending; add/mod keep the CPU composite path (they read straight RGB).
+    if (p.blend != BlendMode::Blend) return false;
+    if (p.grayscale || p.negative || p.mask) return false;
+    return p.color_multiply[0] == 1.0 && p.color_multiply[1] == 1.0 &&
+           p.color_multiply[2] == 1.0;
+}
+
+void RenderEngine::composite_group_bake_premul(TextureRef target,
+                                               const GroupPlan& p,
+                                               bool had_clip,
+                                               const IRect& old_clip) {
+    // The offscreen pass wrote premultiplied RGBA into `target` (GLES blend
+    // func separate: src.rgb*1, dst*(1-src.a)). Scaling by the group alpha
+    // therefore multiplies rgb AND alpha, which is exactly the color mod +
+    // alpha mod pair below; drawing with BlendMode::Premul then reproduces
+    // the CPU path's straight-alpha composite without any readback.
+    const uint8_t a = alpha_byte(p.group_alpha);
+    backend_->set_texture_color_mod(target, a, a, a);
+    backend_->set_texture_alpha_mod(target, a);
+    backend_->set_texture_blend(target, BlendMode::Premul);
+    if (p.clip && p.clip->w > 0 && p.clip->h > 0) {
+        backend_->set_clip(*p.clip);
+    }
+    const FRect full{0, 0, float(stage_w_), float(stage_h_)};
+    backend_->draw_texture(target, nullptr, &full);
+    restore_render_clip(had_clip, old_clip);
+}
+
 TextureRef RenderEngine::begin_offscreen_pass(TextureRef target,
                                               const GroupPlan& p) {
     backend_->set_texture_blend(target, BlendMode::Blend);
@@ -600,9 +639,24 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
     if (had_clip) old_clip = backend_->clip_rect();
     const auto cmit = group_tex_cache.find(layer.id);
     if (cmit != group_tex_cache.end() && cmit->second) {
-        // The bake already contains the subtree glyphs.
-        composite_group_bake(cmit->second, p, had_clip, old_clip);
-        return;
+        // The bake already contains the subtree glyphs — but only when its
+        // flavour matches this plan. An identity plan caches a premultiplied
+        // TARGET (no readback), a filtered/masked plan caches straight RGBA;
+        // compositing one with the other's blend would be wrong, so a
+        // flavour change drops the cache entry and re-bakes below.
+        const bool want_premul = group_plan_is_identity_composite(p);
+        const auto fmit = group_tex_premul_.find(layer.id);
+        const bool have_premul = fmit != group_tex_premul_.end() && fmit->second;
+        if (have_premul == want_premul) {
+            if (want_premul)
+                composite_group_bake_premul(cmit->second, p, had_clip, old_clip);
+            else
+                composite_group_bake(cmit->second, p, had_clip, old_clip);
+            return;
+        }
+        backend_->destroy_texture(cmit->second);
+        group_tex_cache.erase(cmit);
+        group_tex_premul_.erase(layer.id);
     }
     TextureRef group_tex = backend_->create_texture(stage_w_, stage_h_,
                                                     TextureAccess::Target);
@@ -625,6 +679,22 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
     *drawn_out += draw_node_text(layer, world, parent_op);
     for (const oa::render::SceneNode* c : node.children)
         draw_node(sc, *c, world, parent_op, p.clip, drawn_out);
+    // ---- GPU fast path: a pure "over" group needs no readback ----------
+    // The target already holds premultiplied RGBA, so compositing it with
+    // BlendMode::Premul is pixel-equivalent (to within the CPU path's
+    // un-premultiply rounding) to the readback + CPU composite + re-upload
+    // below — and skips a full-screen glReadPixels and an ~stage-sized upload.
+    if (group_plan_is_identity_composite(p)) {
+        end_offscreen_pass(saved_target, had_clip, old_clip);
+        TextureRef prev = group_tex_cache[layer.id];
+        if (prev && prev != group_tex) backend_->destroy_texture(prev);
+        group_tex_cache[layer.id] = group_tex; // owns it until invalidation
+        group_tex_premul_[layer.id] = true;
+        composite_group_bake_premul(group_tex, p, had_clip, old_clip);
+        ++group_premul_bakes_;
+        return;
+    }
+    ++group_readback_bakes_;
     // read the group target back for the CPU composite
     int gw = 0, gh = 0;
     std::vector<uint8_t> px;
@@ -642,6 +712,7 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
     TextureRef baked = upload_baked_texture(out_px, stage_w_, stage_h_);
     if (baked) {
         group_tex_cache[layer.id] = baked; // owns it until invalidation
+        group_tex_premul_[layer.id] = false;
         composite_group_bake(baked, p, had_clip, old_clip);
     }
     backend_->destroy_texture(group_tex);
@@ -1230,6 +1301,7 @@ void RenderEngine::render_clear_tex_cache()
     for (auto& [k, t] : group_tex_cache)
         if (t) backend_->destroy_texture(t);
     group_tex_cache.clear();
+    group_tex_premul_.clear();
     // anchor-frame bounds are scene-dependent — they must
     // re-resolve whenever group bakes are invalidated (scene/text/anime/
     // fade/video changed).

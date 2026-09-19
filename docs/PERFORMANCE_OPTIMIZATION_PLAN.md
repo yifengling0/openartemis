@@ -30,7 +30,7 @@
 | — | 分段计时（逻辑/解释器/文本/合成各自的 ns 桶，x86/OHOS 上按需加） | 未做（当前计数面覆盖渲染/IO；脚本侧用现有 `OA_*` 诊断） |
 | — | 脏区渲染（damage rect + scissor + 局部上传） | 未做（P1，需先做驱动 back-buffer 语义实测） |
 | — | **字形度量缓存**（(face,ppem,cp) → GlyphMeasure；布局每帧重排整页、绘制每字形都调 FreeType） | **已完成**（`FontSystem::GlyphMetricsKey` + `glyphs h/f m/f` 计数） |
-| §1.2 | **intermediate_render 组烘焙的全屏回读**（`glReadPixels` + 整幅 CPU 合成 + 重新上传，gzsq 实测 152–385 MB/s 上传/120 次纹理新建每秒） | **已定位，未做**（下一步：参数为恒等的组走 GPU 预乘混合直通，需用像素基线验证） |
+| §1.2 | **intermediate_render 组烘焙的全屏回读**（`glReadPixels` + 整幅 CPU 合成 + 重新上传，gzsq 实测 152–385 MB/s 上传/120 次纹理新建每秒） | **已完成**：参数为恒等的组走 GPU 预乘混合直通（`BlendMode::Premul`），不再回读；见下方 A/B 数据 |
 
 基线采集：
 
@@ -52,6 +52,30 @@ OA_PROFILE=1 ./build_sdl2/src/app/openartemis --fps 30 --frames 200 <game>/root.
 
 结论：逻辑 tick 不是瓶颈（0.1–0.4 ms/帧）；gzsq 这类含 `intermediate_render` 组与
 E-mote/视频画布的包，成本集中在**每帧整幅纹理上传与组烘焙回读**上。
+
+### 组烘焙 GPU 直通（2026-09-19 落地）A/B 实测
+
+同一二进制、同一命令（`--fps 60 --frames 600`，窗口 GLES），仅切
+`OA_GROUP_PREMUL`（0 = 旧的回读+CPU 合成，1 = 预乘直通）：
+
+| 指标 | 旧路径 (0) | 新路径 (1) | 变化 |
+|---|---|---|---|
+| uploads/frame | 0.8 | 0.0 | −100% |
+| 上传带宽 upMB/s | 151.4 | 2.6 | **−98.3%** |
+| 纹理新建（5.5s 内） | 473 | 240 | −49% |
+| CPU 时间（600 帧） | 7.94 s | **3.08 s** | **−61%** |
+| 组合成 premul/f · readback/f | 0.00 · 0.76 | 0.76 · 0.00 | 全部走直通 |
+| journal（luma/layers/drawn/layer_ev/text_ev/switch_ev） | 216.5/111/7/266/0/30 | 同左 | 完全一致 |
+| 末帧像素（PPM 逐通道） | — | — | **0 差异** |
+
+另两个包（tmny31 / 枫笛，标题带动画）的 A/B 像素差（5.1% / 0.95%）均**小于**
+同设置的跑间噪声（7.9% / 2.2%），即差异来自动画相位而非合成路径。
+
+实现要点：离屏 target 的像素本来就是预乘 RGBA（离屏 pass 用 GLES 的
+premultiplied 混合写入），因此恒等参数组（无 color multiply/灰度/负片/mask、
+layermode=over）可以直接用 `BlendMode::Premul` + rgb/alpha 双 mod 叠回主 target；
+缓存记 flavour（预乘 target vs 直接 RGBA bake），flavour 变化时重烘焙，避免两种
+纹理被错误混合。`OA_GROUP_PREMUL=0` 保留旧路径用于二分定位与旧像素基线复现。
 
 ---
 

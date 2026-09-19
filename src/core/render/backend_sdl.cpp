@@ -19,6 +19,7 @@ SDL_BlendMode to_sdl_blend(BlendMode m) {
         case BlendMode::None: return SDL_BLENDMODE_NONE;
         case BlendMode::Add: return SDL_BLENDMODE_ADD;
         case BlendMode::Mod: return SDL_BLENDMODE_MOD;
+        case BlendMode::Premul: return SDL_BLENDMODE_PREMULTIPLIED;
         case BlendMode::Blend: break; // fallthrough to default
     }
     return SDL_BLENDMODE_BLEND;

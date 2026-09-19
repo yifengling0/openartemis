@@ -79,9 +79,11 @@
 
 ## 4. 本轮不做 + 触发条件（P1/P2）
 
-- **P1 性能批次**（`docs/PERFORMANCE_OPTIMIZATION_PLAN.md` 的剩余项）：分段 Profiler、图片异步解码/预取、
-  纹理淘汰、脏区渲染、视频 GPU 路径与解码预热、构建开关（`-fvisibility=hidden` 等）。
-  触发条件：兼容批次稳定（真包冒烟全绿、现有 ctest 全绿）后按收益排序实施。
+- **P1 性能批次**（`docs/PERFORMANCE_OPTIMIZATION_PLAN.md` 的剩余项）：已完成
+  Profiler（计数 + tick 分相 + `OA_PROFILE`）、字形度量缓存、`intermediate_render`
+  组烘焙的 GPU 预乘直通（gzsq 实测上传 −98%、CPU −61%、末帧像素 0 差异）；
+  剩余：图片异步解码/预取、纹理淘汰、脏区渲染、视频 GPU 路径与解码预热、
+  `-fvisibility=hidden` 等构建开关。
 - **P2 `tag.ini` 解析**：触发条件 = 出现某真包把立绘命令当对白/宏参数串用的证据；
   本机 4 包普查未命中。
 - **P2 自定义 shader（`lyshader`/HLSL 子集）**：触发条件 = 出现某真包实际使用 `lyshader` 且画面缺失的证据；

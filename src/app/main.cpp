@@ -346,6 +346,8 @@ struct ProfileSnapshot {
     uint64_t script_us = 0;
     uint64_t content_us = 0;
     uint64_t other_us = 0;
+    uint64_t group_premul = 0;
+    uint64_t group_readback = 0;
     Uint64 ms = 0;
 };
 
@@ -373,6 +375,10 @@ static ProfileSnapshot profile_snapshot(const AppState* state) {
             state->oaRender->font_cache_stats();
         s.metric_hits = fs.metrics_hits;
         s.metric_misses = fs.metrics_misses;
+        const oa::render::RenderEngine::GroupStats gs =
+            state->oaRender->group_stats();
+        s.group_premul = gs.premul;
+        s.group_readback = gs.readback;
     }
     {
         const oa::runtime::GameRuntime::TickProfile& tp = state->rt->tick_profile();
@@ -398,7 +404,7 @@ static void profile_report(const AppState* state, const ProfileSnapshot& prev,
         "binds/f=%.1f | tex=%llu uploads/f=%.1f upMB/s=%.1f | "
         "decode/f=%.1f decode_ms/f=%.1f readMB/s=%.1f miss=%llu | "
         "glyphs h/f=%.1f m/f=%.1f | tick/f=%.2fms script=%.2fms content=%.2fms "
-        "other=%.2fms | layers=%zu\n",
+        "other=%.2fms | groups premul/f=%.2f readback/f=%.2f | layers=%zu\n",
         dt_s, (unsigned long long)df, double(df) / dt_s,
         per(cur.draws, prev.draws), per(cur.batches, prev.batches),
         per(cur.binds, prev.binds), (unsigned long long)(cur.textures - prev.textures),
@@ -413,6 +419,8 @@ static void profile_report(const AppState* state, const ProfileSnapshot& prev,
         per(cur.script_us, prev.script_us) / 1000.0,
         per(cur.content_us, prev.content_us) / 1000.0,
         per(cur.other_us, prev.other_us) / 1000.0,
+        per(cur.group_premul, prev.group_premul),
+        per(cur.group_readback, prev.group_readback),
         state->rt ? state->rt->scene().size() : 0);
     std::fflush(stdout);
 }
