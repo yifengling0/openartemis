@@ -52,6 +52,8 @@ public:
     TextureRef create_texture(int w, int h, TextureAccess access) override;
     void destroy_texture(TextureRef t) override;
     void update_texture(TextureRef t, const uint8_t* rgba, int pitch) override;
+    bool update_texture_region(TextureRef t, int x, int y, int w, int h,
+                               const uint8_t* rgba, int pitch) override;
     bool lock_texture(TextureRef t, uint8_t** pixels, int* pitch) override;
     void unlock_texture(TextureRef t) override;
     bool texture_size(TextureRef t, float* w, float* h) override;

@@ -1,4 +1,8 @@
-build/
-build-*/
+/build/
+/build_sdl2/
+/build_sdl2_debug/
+/build_harmony_arm64/
+/build_harmony_x86_64/
 .vscode/
+.idea/
 compile_commands.json

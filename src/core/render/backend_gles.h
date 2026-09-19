@@ -76,6 +76,9 @@ public:
     TextureRef create_texture(int w, int h, TextureAccess access) override;
     void destroy_texture(TextureRef t) override;
     void update_texture(TextureRef t, const uint8_t* rgba, int pitch) override;
+    bool update_texture_region(TextureRef t, int x, int y, int w, int h,
+                               const uint8_t* rgba, int pitch) override;
+    bool inplace_streaming_update() const override { return true; }
     bool lock_texture(TextureRef t, uint8_t** pixels, int* pitch) override;
     void unlock_texture(TextureRef t) override;
     bool texture_size(TextureRef t, float* w, float* h) override;
@@ -88,16 +91,49 @@ public:
 
     bool window_to_render(float wx, float wy, float* rx, float* ry) override;
     bool render_to_window(float rx, float ry, float* wx, float* wy) override;
+    void note_window_size(int w, int h) override;
+    bool present_size(int* w, int* h) override;
 
 private:
     void fail(const char* fmt, ...); // 记录 last_error 文本（+ SDL_SetError）
-    void apply_draw_state(GlesTexture* tex, BlendMode blend);
+    void apply_draw_state(const GlesTexture* tex, BlendMode blend,
+                          bool clip_on, const IRect& clip);
     void emit_quad(const float x0, const float y0, const float x1,
                    const float y1, const float u0, const float v0,
-                   const float u1, const float v1, const float col[4]);
+                   const float u1, const float v1, const float col[4],
+                   float* out); // 纯几何构造（6 顶点 × 8 float），无 GL 调用
     void ensure_window_ready(); // 刷新输出尺寸/letterbox（目标=窗口时）
     bool ensure_program();
     bool ensure_rule_program(); // type-2 rule 溶解专用 program（懒建）
+
+    // ---- draw 合批（docs/PERFORMANCE_OPTIMIZATION_PLAN.md §1.2） ----
+    // 同纹理/同混合/同 clip 的连续绘制累积成三角形 soup，键切换或帧边界
+    // （present/set_target/clear/read_target/rule 转场）一次性上传+绘制。
+    // 文本页从 O(字形数) draw call 降到 O(1)。绘制顺序 = 追加顺序，
+    // 状态以追加时捕获的键为准 → 与逐绘制立即执行逐像素等价。
+    void batch_append(const GlesTexture* tex, BlendMode blend,
+                      const float* verts, int nverts);
+    void flush_batch(); // 上传并绘制累积批次（空批次 no-op）
+    std::vector<float> batch_;
+    const GlesTexture* batch_tex_ = nullptr;
+    BlendMode batch_blend_ = BlendMode::Blend;
+    bool batch_clip_on_ = false;
+    IRect batch_clip_{};
+    bool batch_key_valid_ = false;
+
+    // ---- apply_draw_state 的 GL 调用去重（上一次实际应用到驱动的状态） ----
+    unsigned int gl_cur_program_ = 0;
+    BlendMode gl_blend_ = BlendMode::Blend;
+    bool gl_blend_valid_ = false;
+    bool gl_scissor_on_ = false;
+    IRect gl_scissor_rect_{};
+    bool gl_scissor_valid_ = false;
+    float gl_scale_[2] = {0.0f, 0.0f};
+    float gl_off_[2] = {0.0f, 0.0f};
+    bool gl_xform_valid_ = false;
+    int gl_usetex_ = -1;
+    unsigned int gl_bound_tex_ = 0;
+    int gl_viewport_[4] = {0, 0, -1, -1}; // w/h=-1 → 首帧必设
 
     // ---- GL 对象 ----
     SDL_Window* window_ = nullptr;
@@ -131,6 +167,7 @@ private:
     float dst_w_ = 0, dst_h_ = 0;
     float cur_scale_x_ = 1.0f, cur_scale_y_ = 1.0f; // 逻辑→像素
     float dpi_x_ = 1.0f, dpi_y_ = 1.0f;             // 窗口坐标→像素
+    int noted_w_ = 0, noted_h_ = 0;                 // SIZE_CHANGED / surface hint
 
     GlesTexture* gles_tex(TextureRef t) const {
         return t ? static_cast<GlesTexture*>(t) : nullptr;

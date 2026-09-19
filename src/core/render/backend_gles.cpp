@@ -6,13 +6,25 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+
+#if defined(__OHOS__)
+// KR2 Harmony path (krkrsdl_harmony.cpp + krkrsdl_gl.cpp): link libGLESv3.so
+// and call GLES via <GLES3/gl3.h>. SDL_GL_GetProcAddress on OHOS looks up
+// libGLESv2.so, so GLES3 entry points (VAO, etc.) come back NULL.
+#include <GLES3/gl3.h>
+#include <EGL/egl.h>
+#include <dlfcn.h>
+#include <hilog/log.h>
+#endif
 
 // 原生 OpenGL ES 后端：GLES 全部原语手写（无 SDL_Render）。
 // 渲染数学对照本机 sdl 线实际生效的 SDL3 "opengl" 渲染驱动逐项复刻，目标 =
 // 同一批真实旅程上 GLES↔sdl 帧逐字节一致（或 ≤ 已知取整级差的量化差异）。
-// GL 入口点经 SDL_GL_GetProcAddress 加载（本文件内自声明类型/常量，无
-// <GLES3/gl3.h> 依赖）；只使用 GLES 3.0 核心函数。
+// Desktop: GL 入口点经 SDL_GL_GetProcAddress 加载。Harmony: 与 KR2 一样走
+// 已链接的 libGLESv3.so。只使用 GLES 3.0 核心函数。
 
 // ---------------------------------------------------------------------------
 // GLES 3.0 最小 API 面（类型 + 常量 + 函数指针表，create() 时加载）
@@ -123,9 +135,21 @@ struct GlProcs {
 #undef OA_GLP
     /// 加载全部入口点；失败返回 false 并写明缺哪个。
     bool load(const char** missing) {
+#if defined(__OHOS__)
+        // Same as KR2: the GLES3 symbols are already in this DSO's link map.
+#define OA_GLL(name)                                                        \
+    name = reinterpret_cast<decltype(name)>(                                \
+        reinterpret_cast<void(*)()>(::gl##name));                           \
+    if (!name)                                                              \
+        name = (decltype(name))SDL_GL_GetProcAddress("gl" #name);           \
+    if (!name)                                                              \
+        name = (decltype(name))dlsym(RTLD_DEFAULT, "gl" #name);             \
+    if (!name) { *missing = #name; return false; }
+#else
 #define OA_GLL(name)                                                        \
     name = (decltype(name))SDL_GL_GetProcAddress("gl" #name);               \
     if (!name) { *missing = #name; return false; }
+#endif
         OA_GLL(ActiveTexture) OA_GLL(AttachShader) OA_GLL(BindBuffer)
         OA_GLL(BindFramebuffer) OA_GLL(BindTexture) OA_GLL(BindVertexArray)
         OA_GLL(BlendEquation) OA_GLL(BlendFuncSeparate) OA_GLL(BufferData)
@@ -152,9 +176,15 @@ struct GlProcs {
     }
 };
 
+#if !defined(__OHOS__)
 GlProcs g;
+#endif
 
-// 便利别名：g.glXxx 保持源码与 GLES 调用同形
+// Desktop: all gl* calls go through the GetProcAddress table.
+// OHOS: do not remap — call the libGLESv3 prototypes from <GLES3/gl3.h>
+// exactly like KR2 (krkrsdl_gl.cpp). A function-pointer table is how GLES3
+// symbols went NULL on this platform (SDL looks up libGLESv2).
+#if !defined(__OHOS__)
 #define glActiveTexture g.ActiveTexture
 #define glAttachShader g.AttachShader
 #define glBindBuffer g.BindBuffer
@@ -209,15 +239,18 @@ GlProcs g;
 #define glUseProgram g.UseProgram
 #define glVertexAttribPointer g.VertexAttribPointer
 #define glViewport g.Viewport
+#endif
 
-const char* kVertexShader = R"(
-#version 300 es
-precision highp float;
+// GLSL ES 3.00. Keep shader text ASCII-only: Harmony GPU compilers (Mali /
+// Maleoon / Adreno) reject non-ASCII even in comments. KR2 puts #version as
+// the first byte of the raw string — a leading newline is enough to fail
+// compile on some drivers ("#version must be the first directive").
+const char* kVertexShader = R"(#version 300 es
 layout(location = 0) in vec2 aPos;
 layout(location = 1) in vec4 aColor;
 layout(location = 2) in vec2 aUV;
-uniform vec2 uScale;  // 像素→NDC 系数（每轴；窗口目标 y 轴取负 = y-down）
-uniform vec2 uOff;    // 像素→NDC 平移
+uniform vec2 uScale;
+uniform vec2 uOff;
 out vec4 vColor;
 out vec2 vUV;
 void main() {
@@ -228,35 +261,29 @@ void main() {
 }
 )";
 
-const char* kFragmentShader = R"(
-#version 300 es
-precision highp float;
+const char* kFragmentShader = R"(#version 300 es
+precision mediump float;
+precision highp int;
 in vec4 vColor;
 in vec2 vUV;
 uniform sampler2D uTex;
-uniform int uUseTex;
+uniform highp int uUseTex;
 out vec4 fragColor;
 void main() {
-    if (uUseTex == 1)
-        fragColor = texture(uTex, vUV) * vColor; // sdl 线语义：texel*vcolor
+    if (uUseTex != 0)
+        fragColor = texture(uTex, vUV) * vColor;
     else
         fragColor = vColor;
 }
 )";
 
-// [trans type=2] rule 灰度溶解 fragment（与 kVertexShader 同链接；vColor 未用）。
-// 逐像素旧帧覆盖率 keep = smoothstep(t, t+band, rule.r)，
-//   t = progress*(1+band) - band，band = max(vague,1)/255（vague 0-255 尺度），
-// rule 按整幅舞台 UV 拉伸采样（灰度取 R 通道）。输出 = capture 的 rgb、
-// alpha = cap.a*keep → 标准 blend 叠到当前场景上。端点连续：progress=0 →
-// keep 全 1（只见旧帧），progress=1 → keep 全 0（只见新场景）；rule 灰度低
-// 的像素先揭示（若要反向只改比较方向一行）。
-const char* kRuleFragmentShader = R"(
-#version 300 es
-precision highp float;
+// [trans type=2] rule dissolve. keep = smoothstep(t, t+band, rule.r) with
+// t = progress*(1+band)-band. Capture RGB, alpha = cap.a*keep.
+const char* kRuleFragmentShader = R"(#version 300 es
+precision mediump float;
 in vec2 vUV;
-uniform sampler2D uTex;   // unit 0：旧帧 capture
-uniform sampler2D uRule;  // unit 1：rule 灰度图
+uniform sampler2D uTex;
+uniform sampler2D uRule;
 uniform float uProgress;
 uniform float uBand;
 out vec4 fragColor;
@@ -271,7 +298,40 @@ void main() {
 
 unsigned int compile_shader(unsigned int type, const char* src, char* log,
                             size_t logsz) {
+    while (src && (*src == '\n' || *src == '\r' || *src == ' ' || *src == '\t'))
+        ++src;
+#ifdef OA_USE_SDL2
+    std::string rewritten;
+#if defined(__OHOS__) || defined(__ANDROID__)
+    const bool rewrite_desktop = false;
+#else
+    const bool rewrite_desktop = true;
+#endif
+    const char* es = "#version 300 es";
+    if (rewrite_desktop && src && std::strncmp(src, es, std::strlen(es)) == 0) {
+        rewritten = src;
+        const auto pos = rewritten.find(es);
+        if (pos != std::string::npos)
+            rewritten.replace(pos, std::strlen(es), "#version 330");
+        // Desktop GL rejects ES-only precision statements (highp/mediump/int).
+        for (;;) {
+            auto p = rewritten.find("precision ");
+            if (p == std::string::npos) break;
+            auto e = rewritten.find(';', p);
+            if (e == std::string::npos) break;
+            rewritten.erase(p, e - p + 1);
+        }
+        src = rewritten.c_str();
+    }
+#endif
     const unsigned int sh = glCreateShader(type);
+    if (!sh) {
+        if (log && logsz) {
+            std::snprintf(log, logsz, "glCreateShader returned 0 (err=0x%x)",
+                          (unsigned)glGetError());
+        }
+        return 0;
+    }
     const GLchar_* s = src;
     glShaderSource(sh, 1, &s, nullptr);
     glCompileShader(sh);
@@ -282,6 +342,127 @@ unsigned int compile_shader(unsigned int type, const char* src, char* log,
         glGetShaderInfoLog(sh, (GLsizei_)logsz, &len, log);
     }
     return ok ? sh : 0;
+}
+
+int portrait_top_offset_pct()
+{
+    // Same contract as KR2 / RPGRunner: TAPIR_PORTRAIT_TOP_OFFSET is 0=top,
+    // 50=center, 100=bottom. Unset → 0 (top), matching those engines.
+    const char* env = std::getenv("TAPIR_PORTRAIT_TOP_OFFSET");
+    if (!env || !*env) return 0;
+    int pct = std::atoi(env);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
+#if defined(__OHOS__)
+bool query_egl_surface_size(int* w, int* h)
+{
+    const EGLDisplay dpy = eglGetCurrentDisplay();
+    const EGLSurface surf = eglGetCurrentSurface(EGL_DRAW);
+    if (dpy == EGL_NO_DISPLAY || surf == EGL_NO_SURFACE) return false;
+    EGLint ew = 0, eh = 0;
+    if (!eglQuerySurface(dpy, surf, EGL_WIDTH, &ew)) return false;
+    if (!eglQuerySurface(dpy, surf, EGL_HEIGHT, &eh)) return false;
+    if (ew <= 1 || eh <= 1) return false;
+    if (w) *w = int(ew);
+    if (h) *h = int(eh);
+    return true;
+}
+#endif
+
+void query_output_size(SDL_Window* window, int* ow, int* oh, int* ws, int* hs,
+                       int noted_w, int noted_h)
+{
+    int w = 0, h = 0, pw = 0, ph = 0;
+    if (window) SDL_GetWindowSize(window, &w, &h);
+#ifdef OA_USE_SDL2
+    // Drawable size is the EGL/XComponent buffer. Window size can stay at
+    // the 0x0 / stage size used at CreateWindow while the surface is already
+    // full-screen — letterboxing against that leaves a postage-stamp stage.
+    if (window) SDL_GL_GetDrawableSize(window, &pw, &ph);
+#else
+    if (window) SDL_GetWindowSizeInPixels(window, &pw, &ph);
+#endif
+#if defined(__OHOS__)
+    int ew = 0, eh = 0;
+    if (query_egl_surface_size(&ew, &eh)) {
+        pw = ew;
+        ph = eh;
+        // The EGL buffer is the only pixels we can draw into. Keep window
+        // metrics identical so dpi stays 1 (ArkTS/touch are already in
+        // surface pixels) and letterbox uses the full XComponent, not the
+        // 1×1 / stage size left over from CreateWindow.
+        w = ew;
+        h = eh;
+    }
+    if ((pw <= 1 || ph <= 1) && noted_w > 1 && noted_h > 1) {
+        pw = noted_w;
+        ph = noted_h;
+    }
+    if ((w <= 1 || h <= 1) && noted_w > 1 && noted_h > 1) {
+        w = noted_w;
+        h = noted_h;
+    }
+    if (pw > 1 && ph > 1 && (w != pw || h != ph)) {
+        w = pw;
+        h = ph;
+    }
+#endif
+    if (pw <= 0 || ph <= 0) {
+        pw = w;
+        ph = h;
+    }
+    if (ow) *ow = pw;
+    if (oh) *oh = ph;
+    if (ws) *ws = w;
+    if (hs) *hs = h;
+}
+
+void compute_letterbox(int ow, int oh, int lw, int lh,
+                       float* dst_x, float* dst_y, float* dst_w, float* dst_h)
+{
+    if (ow <= 0 || oh <= 0 || lw <= 0 || lh <= 0) {
+        *dst_x = 0;
+        *dst_y = 0;
+        *dst_w = float(std::max(0, ow));
+        *dst_h = float(std::max(0, oh));
+        return;
+    }
+    const float fow = float(ow), foh = float(oh);
+    const float flw = float(lw), flh = float(lh);
+    const float want = flw / flh, real = fow / foh;
+    if (std::fabs(want - real) < 0.0001f) {
+        *dst_x = 0;
+        *dst_y = 0;
+        *dst_w = fow;
+        *dst_h = foh;
+        return;
+    }
+    if (want > real) {
+        // Stage wider than the screen: fit width, letterbox top/bottom.
+        const float s = fow / flw;
+        *dst_x = 0;
+        *dst_w = fow;
+        *dst_h = std::floor(flh * s);
+        const float remaining = foh - *dst_h;
+        if (remaining > 1.0f && oh > ow) {
+#if defined(__OHOS__) || defined(__ANDROID__)
+            *dst_y = remaining * float(portrait_top_offset_pct()) / 100.0f;
+#else
+            *dst_y = remaining / 2.0f;
+#endif
+        } else {
+            *dst_y = remaining / 2.0f;
+        }
+    } else {
+        const float s = foh / flh;
+        *dst_y = 0;
+        *dst_h = foh;
+        *dst_w = std::floor(flw * s);
+        *dst_x = (fow - *dst_w) / 2.0f;
+    }
 }
 
 } // namespace
@@ -298,6 +479,9 @@ void GlesRenderBackend::fail(const char* fmt, ...) {
     va_end(ap);
     err_ = buf;
     SDL_SetError("%s", buf);
+#ifdef __OHOS__
+    OH_LOG_Print(LOG_APP, LOG_ERROR, 0xFF00, "openartemis", "%{public}s", buf);
+#endif
 }
 
 bool GlesRenderBackend::ensure_program() {
@@ -339,6 +523,7 @@ bool GlesRenderBackend::ensure_program() {
     const GLint_ utex = glGetUniformLocation(prog, "uTex");
     program_ = prog;
     glUseProgram(program_);
+    gl_cur_program_ = program_;
     if (utex >= 0) glUniform1i(utex, 0);
     // VAO/VBO：交错 8 float/顶点（pos.xy + color.rgba + uv.xy）
     glGenVertexArrays(1, &vao_);
@@ -403,6 +588,7 @@ bool GlesRenderBackend::ensure_rule_program() {
     if (rule_loc_utex_ >= 0) glUniform1i(rule_loc_utex_, 0);
     if (rule_loc_urule_ >= 0) glUniform1i(rule_loc_urule_, 1);
     glUseProgram(program_); // 状态回到主 program
+    gl_cur_program_ = program_;
     return true;
 }
 
@@ -414,13 +600,56 @@ bool GlesRenderBackend::create(SDL_Window* window, int stage_w, int stage_h,
     logical_w_ = stage_w;
     logical_h_ = stage_h;
     if (!gl_context_) {
+#if defined(__OHOS__)
+        // Host already created the context the KR2 way. Do not CreateContext
+        // again (OHOS is a single XComponent/EGL surface) and do not treat a
+        // second MakeCurrent failure as fatal — CreateContext already made it
+        // current, and KR2 ignores MakeCurrent's return.
+        gl_context_ = SDL_GL_GetCurrentContext();
+        if (!gl_context_) {
+            gl_context_ = SDL_GL_CreateContext(window);
+            if (!gl_context_) {
+                SDL_ClearError();
+                SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+                SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+                SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+                gl_context_ = SDL_GL_CreateContext(window);
+            }
+        }
+        if (!gl_context_) {
+            fail("[oa-kr2gl] GLES context creation failed: %s", SDL_GetError());
+            return false;
+        }
+        // CreateContext already made the context current (SDL_EGL_CreateContext
+        // calls eglMakeCurrent). A second OHOS_GLES_MakeCurrent can wait on /
+        // recreate the XComponent surface and unbind a working context. Only
+        // rebind if TLS current is empty.
+        if (SDL_GL_GetCurrentContext() != gl_context_)
+            (void)oa_sdl2_GL_MakeCurrent()(window, (SDL_GLContext)gl_context_);
+#else
         // GLES 上下文由后端 create() 内创建
         // （SDL_GL ES profile；本机 Xvfb/radeonsi 实测 ES 3.2 可建）。
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+#if defined(OA_USE_SDL2) && !defined(__ANDROID__)
+                            SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+#else
                             SDL_GL_CONTEXT_PROFILE_ES);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#endif
         gl_context_ = SDL_GL_CreateContext(window);
+#if defined(OA_USE_SDL2)
+        if (!gl_context_) {
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                                SDL_GL_CONTEXT_PROFILE_ES);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+            gl_context_ = SDL_GL_CreateContext(window);
+        }
+#endif
         if (!gl_context_) {
             fail("gles: GLES context creation failed: %s", SDL_GetError());
             return false;
@@ -431,6 +660,77 @@ bool GlesRenderBackend::create(SDL_Window* window, int stage_w, int stage_h,
             gl_context_ = nullptr;
             return false;
         }
+#endif
+#if defined(__OHOS__)
+        // KR2 (krkrsdl_harmony.cpp / krkrsdl_android.cpp / krkrsdl.cpp):
+        // SwapInterval(1) waits one compositor vblank. That is the frame
+        // clock — 60, 90, 120, 144 Hz, whatever the panel actually runs.
+        // Do not force interval N to fake 60 Hz, and do not pair this with
+        // a software 60 Hz SDL_Delay (the two waits stacked to ~30 fps).
+        if (SDL_GL_SetSwapInterval(1) != 0) {
+            SDL_Log("[gles] SetSwapInterval(1) failed: %s", SDL_GetError());
+            OH_LOG_Print(LOG_APP, LOG_WARN, 0xFF00, "openartemis",
+                         "[gles] SetSwapInterval(1) failed: %{public}s",
+                         SDL_GetError());
+        }
+#else
+        // Desktop: SwapBuffers blocks on vblank. On 120/180/240 Hz panels
+        // pick interval N so present itself is ~60 Hz (windowed power).
+        // 90/144 Hz are not integer multiples of 60 — interval stays 1 and
+        // the host remainder-sleeps so Lua does not free-run.
+        {
+            int refresh = 0;
+#ifdef OA_USE_SDL2
+            const int idx = SDL_GetWindowDisplayIndex(window);
+            SDL_DisplayMode mode{};
+            // Prefer desktop mode: GetCurrentDisplayMode can report junk on
+            // windowed / VRR setups (this machine logged 32 Hz).
+            if (idx >= 0 && SDL_GetDesktopDisplayMode(idx, &mode) == 0)
+                refresh = mode.refresh_rate;
+            SDL_DisplayMode cur{};
+            if (idx >= 0 && SDL_GetCurrentDisplayMode(idx, &cur) == 0 &&
+                cur.refresh_rate >= 50)
+                refresh = cur.refresh_rate;
+#else
+            const SDL_DisplayID did = SDL_GetDisplayForWindow(window);
+            const SDL_DisplayMode* cur =
+                did ? SDL_GetCurrentDisplayMode(did) : nullptr;
+            if (cur) refresh = cur->refresh_rate;
+#endif
+            int interval = 1;
+            if (refresh >= 50) {
+                const int n = refresh / 60;
+                if (n > 1) {
+                    const int effective = refresh / n;
+                    if (effective >= 54 && effective <= 66) interval = n;
+                }
+            }
+#ifdef OA_USE_SDL2
+            if (SDL_GL_SetSwapInterval(interval) != 0) {
+                std::fprintf(stderr, "[gles] vsync interval %d failed: %s; trying 1\n",
+                             interval, SDL_GetError());
+                SDL_GL_SetSwapInterval(1);
+                interval = 1;
+            }
+            const int got = SDL_GL_GetSwapInterval();
+#else
+            if (!SDL_GL_SetSwapInterval(interval)) {
+                std::fprintf(stderr, "[gles] vsync interval %d failed: %s; trying 1\n",
+                             interval, SDL_GetError());
+                SDL_GL_SetSwapInterval(1);
+                interval = 1;
+            }
+            int got = interval;
+            SDL_GL_GetSwapInterval(&got);
+#endif
+            char hzbuf[32];
+            if (refresh >= 50)
+                std::snprintf(hzbuf, sizeof(hzbuf), "%d Hz", refresh);
+            else
+                std::snprintf(hzbuf, sizeof(hzbuf), "unknown");
+            std::printf("[gles] vsync interval=%d (requested %d, display %s)\n",
+                        got, interval, hzbuf);
+        }
         const char* missing = nullptr;
         if (!g.load(&missing)) {
             fail("gles: GL entry point '%s' unavailable", missing);
@@ -438,40 +738,73 @@ bool GlesRenderBackend::create(SDL_Window* window, int stage_w, int stage_h,
             gl_context_ = nullptr;
             return false;
         }
+#endif
         const GLubyte_* ver = glGetString(GL_VERSION_);
         const GLubyte_* ren = glGetString(GL_RENDERER_);
         std::printf("[gles] context: %s (%s)\n", ver ? (const char*)ver : "?",
                     ren ? (const char*)ren : "?");
+#ifdef __OHOS__
+        SDL_Log("[gles] context: %s (%s)", ver ? (const char*)ver : "?",
+                ren ? (const char*)ren : "?");
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xFF00, "openartemis",
+                     "[gles] context: %{public}s (%{public}s)",
+                     ver ? (const char*)ver : "?",
+                     ren ? (const char*)ren : "?");
+        if (!ver) {
+            fail("[oa-kr2gl] glGetString(GL_VERSION) is NULL (no current GLES context, err=0x%x)",
+                 (unsigned)glGetError());
+            return false;
+        }
+#endif
         glDisable(GL_DEPTH_TEST_);
         glDisable(GL_CULL_FACE_);
         glDisable(GL_SCISSOR_TEST_);
     }
     if (!ensure_program()) return false;
-    // 输出/逻辑尺寸与 letterbox（SDL3 UpdateLogicalPresentation 数学镜像；
-    // DISABLED 分支 scale=1 dst=full —— 引擎总是开 letterbox，mode=2）。
-    SDL_GetWindowSizeInPixels(window, &out_w_, &out_h_);
     int ws = 0, hs = 0;
-    SDL_GetWindowSize(window, &ws, &hs);
-    dpi_x_ = ws > 0 ? float(out_w_) / float(ws) : 1.0f;
-    dpi_y_ = hs > 0 ? float(out_h_) / float(hs) : 1.0f;
-    const float ow = float(out_w_), oh = float(out_h_);
-    const float lw = float(logical_w_), lh = float(logical_h_);
-    const float want = lw / lh, real = ow / oh;
-    if (std::fabs(want - real) < 0.0001f) {
-        dst_x_ = 0; dst_y_ = 0; dst_w_ = ow; dst_h_ = oh;
-    } else if (want > real) { // 宽于输出：上下黑边
-        const float s = ow / lw;
-        dst_x_ = 0; dst_w_ = ow;
-        dst_h_ = std::floor(lh * s);
-        dst_y_ = (oh - dst_h_) / 2.0f;
-    } else { // 窄于输出：左右黑边
-        const float s = oh / lh;
-        dst_y_ = 0; dst_h_ = oh;
-        dst_w_ = std::floor(lw * s);
-        dst_x_ = (ow - dst_w_) / 2.0f;
+    query_output_size(window, &out_w_, &out_h_, &ws, &hs, noted_w_, noted_h_);
+    dpi_x_ = (ws > 1 && out_w_ > 1) ? float(out_w_) / float(ws) : 1.0f;
+    dpi_y_ = (hs > 1 && out_h_ > 1) ? float(out_h_) / float(hs) : 1.0f;
+#if defined(__OHOS__)
+    if (ws == out_w_ && hs == out_h_) {
+        dpi_x_ = 1.0f;
+        dpi_y_ = 1.0f;
     }
-    cur_scale_x_ = dst_w_ / lw;
-    cur_scale_y_ = dst_h_ / lh;
+#endif
+    compute_letterbox(out_w_, out_h_, logical_w_, logical_h_,
+                      &dst_x_, &dst_y_, &dst_w_, &dst_h_);
+    cur_scale_x_ = (logical_w_ > 0 && dst_w_ > 0) ? dst_w_ / float(logical_w_) : 1.0f;
+    cur_scale_y_ = (logical_h_ > 0 && dst_h_ > 0) ? dst_h_ / float(logical_h_) : 1.0f;
+#ifdef __OHOS__
+    {
+        int refresh = 0;
+#ifdef OA_USE_SDL2
+        const int idx = SDL_GetWindowDisplayIndex(window);
+        SDL_DisplayMode cur{};
+        if (idx >= 0 && SDL_GetCurrentDisplayMode(idx, &cur) == 0)
+            refresh = cur.refresh_rate;
+        const int got = SDL_GL_GetSwapInterval();
+#else
+        const SDL_DisplayID did = SDL_GetDisplayForWindow(window);
+        const SDL_DisplayMode* cur =
+            did ? SDL_GetCurrentDisplayMode(did) : nullptr;
+        if (cur) refresh = cur->refresh_rate;
+        int got = 1;
+        SDL_GL_GetSwapInterval(&got);
+#endif
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xFF00, "openartemis",
+                     "[gles] layout win=%{public}dx%{public}d drawable=%{public}dx%{public}d "
+                     "stage=%{public}dx%{public}d dst=%{public}d,%{public}d %{public}dx%{public}d offset=%{public}d",
+                     ws, hs, out_w_, out_h_, logical_w_, logical_h_,
+                     (int)dst_x_, (int)dst_y_, (int)dst_w_, (int)dst_h_,
+                     portrait_top_offset_pct());
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xFF00, "openartemis",
+                     "[gles] vsync interval=%{public}d display=%{public}d Hz "
+                     "(interval 1 = one vblank, not a 60 Hz lock)",
+                     got, refresh);
+        SDL_Log("[gles] vsync interval=%d display=%d Hz", got, refresh);
+    }
+#endif
     if (info) {
         info->output_w = out_w_;
         info->output_h = out_h_;
@@ -485,6 +818,16 @@ bool GlesRenderBackend::create(SDL_Window* window, int stage_w, int stage_h,
 
 void GlesRenderBackend::shutdown()
 {
+    batch_.clear();
+    batch_tex_ = nullptr;
+    batch_key_valid_ = false;
+    gl_cur_program_ = 0;
+    gl_blend_valid_ = false;
+    gl_scissor_valid_ = false;
+    gl_xform_valid_ = false;
+    gl_usetex_ = -1;
+    gl_bound_tex_ = 0;
+    gl_viewport_[2] = gl_viewport_[3] = -1;
     if (!created_) {
         // 半成品上下文也要收掉（create 失败路径已自行清理，这里兜底）
         if (gl_context_) {
@@ -522,48 +865,57 @@ void GlesRenderBackend::set_target(TextureRef t)
     GlesTexture* gt = gles_tex(t);
     if (!gt && t) return; // 无效纹理
     if (!gl_context_) return;
+    if (gt && !gt->fbo) return; // 非 target 纹理不能绑
+    if (gt == cur_target_) return; // 无切换：批次继续累积
+    flush_batch(); // 排队绘制落在旧 target 上
     if (gt) {
-        if (!gt->fbo) return; // 非 target 纹理不能绑
         cur_target_ = gt;
         glBindFramebuffer(GL_FRAMEBUFFER_, gt->fbo);
-        glViewport(0, 0, gt->w, gt->h);
+        if (gl_viewport_[0] != 0 || gl_viewport_[1] != 0 ||
+            gl_viewport_[2] != gt->w || gl_viewport_[3] != gt->h) {
+            glViewport(0, 0, gt->w, gt->h);
+            gl_viewport_[0] = 0; gl_viewport_[1] = 0;
+            gl_viewport_[2] = gt->w; gl_viewport_[3] = gt->h;
+        }
+        gl_xform_valid_ = false; // scale/off 随 target 变
     } else {
         cur_target_ = nullptr;
         glBindFramebuffer(GL_FRAMEBUFFER_, 0);
         ensure_window_ready();
+        gl_xform_valid_ = false;
     }
 }
 
 void GlesRenderBackend::ensure_window_ready()
 {
-    // 目标=窗口：刷新输出像素尺寸；变了就重算 letterbox（resize 语义，
-    // SDL3 UpdateLogicalPresentation 同数学）。
-    int ow = 0, oh = 0;
-    SDL_GetWindowSizeInPixels(window_, &ow, &oh);
-    if (ow == out_w_ && oh == out_h_) return;
-    out_w_ = ow; out_h_ = oh;
-    int ws = 0, hs = 0;
-    SDL_GetWindowSize(window_, &ws, &hs);
-    dpi_x_ = ws > 0 ? float(ow) / float(ws) : 1.0f;
-    dpi_y_ = hs > 0 ? float(oh) / float(hs) : 1.0f;
-    const float fow = float(ow), foh = float(oh);
-    const float lw = float(logical_w_), lh = float(logical_h_);
-    const float want = lw / lh, real = fow / foh;
-    if (std::fabs(want - real) < 0.0001f) {
-        dst_x_ = 0; dst_y_ = 0; dst_w_ = fow; dst_h_ = foh;
-    } else if (want > real) {
-        const float s = fow / lw;
-        dst_x_ = 0; dst_w_ = fow;
-        dst_h_ = std::floor(lh * s);
-        dst_y_ = (foh - dst_h_) / 2.0f;
-    } else {
-        const float s = foh / lh;
-        dst_y_ = 0; dst_h_ = foh;
-        dst_w_ = std::floor(lw * s);
-        dst_x_ = (fow - dst_w_) / 2.0f;
+    // 目标=窗口：刷新 drawable 尺寸与竖屏偏移；变了就重算 letterbox。
+    int ow = 0, oh = 0, ws = 0, hs = 0;
+    query_output_size(window_, &ow, &oh, &ws, &hs, noted_w_, noted_h_);
+    const int pct = portrait_top_offset_pct();
+    static int s_applied_pct = -1;
+    if (ow == out_w_ && oh == out_h_ && pct == s_applied_pct) return;
+    s_applied_pct = pct;
+    out_w_ = ow;
+    out_h_ = oh;
+    dpi_x_ = (ws > 1 && ow > 1) ? float(ow) / float(ws) : 1.0f;
+    dpi_y_ = (hs > 1 && oh > 1) ? float(oh) / float(hs) : 1.0f;
+#if defined(__OHOS__)
+    if (ws == ow && hs == oh) {
+        dpi_x_ = 1.0f;
+        dpi_y_ = 1.0f;
     }
-    cur_scale_x_ = dst_w_ / lw;
-    cur_scale_y_ = dst_h_ / lh;
+#endif
+    compute_letterbox(ow, oh, logical_w_, logical_h_,
+                      &dst_x_, &dst_y_, &dst_w_, &dst_h_);
+    cur_scale_x_ = (logical_w_ > 0 && dst_w_ > 0) ? dst_w_ / float(logical_w_) : 1.0f;
+    cur_scale_y_ = (logical_h_ > 0 && dst_h_ > 0) ? dst_h_ / float(logical_h_) : 1.0f;
+#ifdef __OHOS__
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0xFF00, "openartemis",
+                 "[gles] letterbox win=%{public}dx%{public}d drawable=%{public}dx%{public}d "
+                 "stage=%{public}dx%{public}d dst=%{public}d,%{public}d %{public}dx%{public}d",
+                 ws, hs, ow, oh, logical_w_, logical_h_,
+                 (int)dst_x_, (int)dst_y_, (int)dst_w_, (int)dst_h_);
+#endif
 }
 
 bool GlesRenderBackend::clip_enabled() { return clip_enabled_; }
@@ -594,88 +946,196 @@ void GlesRenderBackend::set_draw_color(uint8_t cr, uint8_t cg, uint8_t cb,
 
 /// 每绘制的混合 + clip 状态（目标空间像素坐标）。SDL 驱动语义：
 /// clip 对 target = 直接；对窗口 = 逻辑坐标缩放后翻转（画到 dst 区）。
-void GlesRenderBackend::apply_draw_state(GlesTexture* tex, BlendMode blend)
+/// GL 调用去重：与上一次实际应用的状态相同则跳过对应调用（合批后
+/// 连续 flush 之间状态几乎不变；逐调用比对也比驱动校验便宜）。
+void GlesRenderBackend::apply_draw_state(const GlesTexture* tex, BlendMode blend,
+                                         bool clip_on, const IRect& clip)
 {
-    glUseProgram(program_);
-    if (blend == BlendMode::None) {
-        glDisable(GL_BLEND_);
-    } else {
-        glEnable(GL_BLEND_);
-        switch (blend) {
-            case BlendMode::Blend:
-                glBlendFuncSeparate(GL_SRC_ALPHA_, GL_ONE_MINUS_SRC_ALPHA_,
-                                    GL_ONE_, GL_ONE_MINUS_SRC_ALPHA_);
-                break;
-            case BlendMode::Add:
-                glBlendFuncSeparate(GL_SRC_ALPHA_, GL_ONE_, GL_ZERO_, GL_ONE_);
-                break;
-            case BlendMode::Mod:
-                glBlendFuncSeparate(GL_ZERO_, GL_SRC_COLOR_, GL_ZERO_, GL_ONE_);
-                break;
-            case BlendMode::None: break;
-        }
-        glBlendEquation(GL_FUNC_ADD_);
+    (void)tex;
+    if (gl_cur_program_ != program_) {
+        glUseProgram(program_);
+        gl_cur_program_ = program_;
     }
+    if (!gl_blend_valid_ || blend != gl_blend_) {
+        if (blend == BlendMode::None) {
+            glDisable(GL_BLEND_);
+        } else {
+            glEnable(GL_BLEND_);
+            switch (blend) {
+                case BlendMode::Blend:
+                    glBlendFuncSeparate(GL_SRC_ALPHA_, GL_ONE_MINUS_SRC_ALPHA_,
+                                        GL_ONE_, GL_ONE_MINUS_SRC_ALPHA_);
+                    break;
+                case BlendMode::Add:
+                    glBlendFuncSeparate(GL_SRC_ALPHA_, GL_ONE_, GL_ZERO_, GL_ONE_);
+                    break;
+                case BlendMode::Mod:
+                    glBlendFuncSeparate(GL_ZERO_, GL_SRC_COLOR_, GL_ZERO_, GL_ONE_);
+                    break;
+                case BlendMode::None: break;
+            }
+            glBlendEquation(GL_FUNC_ADD_);
+        }
+        gl_blend_ = blend;
+        gl_blend_valid_ = true;
+    }
+    // scissor：先算目标空间矩形，再与已应用值比对。
+    bool want_scissor = false;
+    IRect sr{};
+    float sx = 0, sy = 0, ox = 0, oy = 0;
     if (cur_target_) {
         // FBO：clip = 内容坐标（SDL target 分支：不翻行）
-        if (clip_enabled_ && clip_.w > 0 && clip_.h > 0) {
-            glEnable(GL_SCISSOR_TEST_);
-            glScissor(clip_.x, clip_.y, clip_.w, clip_.h);
-        } else {
-            glDisable(GL_SCISSOR_TEST_);
-        }
-        glUniform2f(loc_scale_, 2.0f / float(cur_target_->w),
-                    2.0f / float(cur_target_->h));
-        glUniform2f(loc_off_, -1.0f, -1.0f);
+        want_scissor = clip_on && clip.w > 0 && clip.h > 0;
+        sr = clip;
+        sx = 2.0f / float(cur_target_->w);
+        sy = 2.0f / float(cur_target_->h);
+        ox = -1.0f;
+        oy = -1.0f;
     } else {
         // 窗口：clip 按逻辑坐标缩放（floor/ceil，SDL UpdatePixelClipRect），
         // 落在 letterbox dst 区内（y 翻转到窗口底原点）
-        if (clip_enabled_ && clip_.w > 0 && clip_.h > 0) {
-            const float cx = std::floor(clip_.x * cur_scale_x_);
-            const float cy = std::floor(clip_.y * cur_scale_y_);
-            const float cw = std::ceil(float(clip_.w) * cur_scale_x_);
-            const float ch = std::ceil(float(clip_.h) * cur_scale_y_);
+        if (clip_on && clip.w > 0 && clip.h > 0) {
+            const float cx = std::floor(clip.x * cur_scale_x_);
+            const float cy = std::floor(clip.y * cur_scale_y_);
+            const float cw = std::ceil(float(clip.w) * cur_scale_x_);
+            const float ch = std::ceil(float(clip.h) * cur_scale_y_);
+            want_scissor = true;
+            sr.x = (int)(std::floor(dst_x_) + cx);
+            sr.y = (int)(float(out_h_) - (std::floor(dst_y_) + cy) - ch);
+            sr.w = (int)cw;
+            sr.h = (int)ch;
+        }
+        // Viewport is the letterbox dest in window pixels (KR2
+        // SDL_GL_DrawTexture / RPGRunner recalculate_viewport). Draw
+        // coordinates stay in stage/logical space (SDL logical presentation:
+        // glOrtho(0, stage_w, stage_h, 0)). Using dest pixels here mapped a
+        // 1920x1080 stage into the corner of a 2560x1440 dest.
+        const float vw = dst_w_ > 0 ? dst_w_ : 1.0f;
+        const float vh = dst_h_ > 0 ? dst_h_ : 1.0f;
+        const float lw = logical_w_ > 0 ? float(logical_w_) : vw;
+        const float lh = logical_h_ > 0 ? float(logical_h_) : vh;
+        const int vx = (int)std::floor(dst_x_);
+        const int vy = (int)(float(out_h_) - std::floor(dst_y_) - dst_h_);
+        const int vw_i = (int)std::ceil(vw);
+        const int vh_i = (int)std::ceil(vh);
+        if (gl_viewport_[0] != vx || gl_viewport_[1] != vy ||
+            gl_viewport_[2] != vw_i || gl_viewport_[3] != vh_i) {
+            glViewport((GLint_)vx, (GLint_)vy, (GLsizei_)vw_i, (GLsizei_)vh_i);
+            gl_viewport_[0] = vx; gl_viewport_[1] = vy;
+            gl_viewport_[2] = vw_i; gl_viewport_[3] = vh_i;
+        }
+        sx = 2.0f / lw;
+        sy = -2.0f / lh;
+        ox = -1.0f;
+        oy = 1.0f;
+    }
+    if (!gl_scissor_valid_ || want_scissor != gl_scissor_on_ ||
+        (want_scissor &&
+         (sr.x != gl_scissor_rect_.x || sr.y != gl_scissor_rect_.y ||
+          sr.w != gl_scissor_rect_.w || sr.h != gl_scissor_rect_.h))) {
+        if (want_scissor) {
             glEnable(GL_SCISSOR_TEST_);
-            glScissor((GLint_)(std::floor(dst_x_) + cx),
-                      (GLint_)(float(out_h_) - (std::floor(dst_y_) + cy) -
-                               ch),
-                      (GLsizei_)cw, (GLsizei_)ch);
+            glScissor((GLint_)sr.x, (GLint_)sr.y, (GLsizei_)sr.w, (GLsizei_)sr.h);
         } else {
             glDisable(GL_SCISSOR_TEST_);
         }
-        // y-down：内容 y=0 → NDC +1（SDL 窗口目标 glOrtho(0,w,h,0) 语义）
-        const float dw = dst_w_ > 0 ? dst_w_ : 1.0f;
-        const float dh = dst_h_ > 0 ? dst_h_ : 1.0f;
-        glViewport((GLint_)std::floor(dst_x_),
-                   (GLint_)(float(out_h_) - std::floor(dst_y_) - dst_h_),
-                   (GLsizei_)std::ceil(dw), (GLsizei_)std::ceil(dh));
-        glUniform2f(loc_scale_, 2.0f / dw, -2.0f / dh);
-        glUniform2f(loc_off_, -1.0f, 1.0f);
+        gl_scissor_on_ = want_scissor;
+        gl_scissor_rect_ = sr;
+        gl_scissor_valid_ = true;
     }
-    (void)tex;
-    glUniform1i(loc_usetex_, 0);
+    if (!gl_xform_valid_ || sx != gl_scale_[0] || sy != gl_scale_[1] ||
+        ox != gl_off_[0] || oy != gl_off_[1]) {
+        glUniform2f(loc_scale_, sx, sy);
+        glUniform2f(loc_off_, ox, oy);
+        gl_scale_[0] = sx; gl_scale_[1] = sy;
+        gl_off_[0] = ox; gl_off_[1] = oy;
+        gl_xform_valid_ = true;
+    }
     // 记住本次的像素→NDC 数学（rule program 复用同一坐标约定）
-    if (cur_target_) {
-        last_scale_[0] = 2.0f / float(cur_target_->w);
-        last_scale_[1] = 2.0f / float(cur_target_->h);
-        last_off_[0] = -1.0f;
-        last_off_[1] = -1.0f;
-    } else {
-        const float dw = dst_w_ > 0 ? dst_w_ : 1.0f;
-        const float dh = dst_h_ > 0 ? dst_h_ : 1.0f;
-        last_scale_[0] = 2.0f / dw;
-        last_scale_[1] = -2.0f / dh;
-        last_off_[0] = -1.0f;
-        last_off_[1] = 1.0f;
+    last_scale_[0] = sx;
+    last_scale_[1] = sy;
+    last_off_[0] = ox;
+    last_off_[1] = oy;
+}
+
+// ---------------------------------------------------------------------------
+// draw 合批
+// ---------------------------------------------------------------------------
+
+void GlesRenderBackend::batch_append(const GlesTexture* tex, BlendMode blend,
+                                     const GLfloat_* verts, int nverts)
+{
+    const bool key_match = batch_key_valid_ && batch_tex_ == tex &&
+        batch_blend_ == blend && batch_clip_on_ == clip_enabled_ &&
+        (!clip_enabled_ ||
+         (batch_clip_.x == clip_.x && batch_clip_.y == clip_.y &&
+          batch_clip_.w == clip_.w && batch_clip_.h == clip_.h));
+    if (!key_match) {
+        flush_batch();
+        batch_tex_ = tex;
+        batch_blend_ = blend;
+        batch_clip_on_ = clip_enabled_;
+        batch_clip_ = clip_;
+        batch_key_valid_ = true;
     }
+    batch_.insert(batch_.end(), verts, verts + size_t(nverts) * 8);
+    // 上限防无限增长（长 emote 网格链）：≈2730 quads 即 512KB 顶点。
+    if (batch_.size() >= (size_t(1) << 17)) flush_batch();
+}
+
+void GlesRenderBackend::flush_batch()
+{
+    if (batch_.empty()) return;
+    if (!gl_context_) { // shutdown 后的尾调用：丢弃即可
+        batch_.clear();
+        batch_key_valid_ = false;
+        return;
+    }
+    apply_draw_state(batch_tex_, batch_blend_, batch_clip_on_, batch_clip_);
+    if (batch_tex_) {
+        glActiveTexture(0x84C0); // GL_TEXTURE0
+        if (gl_bound_tex_ != batch_tex_->tex) {
+            glBindTexture(GL_TEXTURE_2D_, batch_tex_->tex);
+            gl_bound_tex_ = batch_tex_->tex;
+        }
+        if (gl_usetex_ != 1) {
+            glUniform1i(loc_usetex_, 1);
+            gl_usetex_ = 1;
+        }
+    } else if (gl_usetex_ != 0) {
+        glUniform1i(loc_usetex_, 0);
+        gl_usetex_ = 0;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER_, vbo_);
+    glBufferData(GL_ARRAY_BUFFER_, GLsizeiptr_(batch_.size() * sizeof(GLfloat_)),
+                 batch_.data(), GL_DYNAMIC_DRAW_);
+    glBindVertexArray(vao_);
+    glDrawArrays(GL_TRIANGLES_, 0, (GLsizei_)(batch_.size() / 8));
+    glBindVertexArray(0);
+    batch_.clear();
 }
 
 void GlesRenderBackend::clear()
 {
     if (!gl_context_) return;
+    flush_batch(); // 先画完已排队内容——clear 语义在先前绘制之后
     // glClear 受 scissor 影响：SDL 驱动在 clear 时先关 scissor（全目标清，
     // SDL CLEAR 命令同语义）；后续绘制的 apply_draw_state 按需重开。
-    if (clip_enabled_) glDisable(GL_SCISSOR_TEST_);
+    if (gl_scissor_on_) {
+        glDisable(GL_SCISSOR_TEST_);
+        gl_scissor_on_ = false;
+        gl_scissor_valid_ = true;
+    }
+    // Window target: leftover FBO viewport is the stage (e.g. 1280x720).
+    // Clear the full drawable so letterbox bars are black and the next
+    // letterbox viewport is not a postage stamp in the corner.
+    if (!cur_target_ && out_w_ > 0 && out_h_ > 0 &&
+        (gl_viewport_[2] != out_w_ || gl_viewport_[3] != out_h_ ||
+         gl_viewport_[0] != 0 || gl_viewport_[1] != 0)) {
+        glViewport(0, 0, out_w_, out_h_);
+        gl_viewport_[0] = 0; gl_viewport_[1] = 0;
+        gl_viewport_[2] = out_w_; gl_viewport_[3] = out_h_;
+    }
     glClearColor(draw_color_[0] / 255.0f, draw_color_[1] / 255.0f,
                  draw_color_[2] / 255.0f, draw_color_[3] / 255.0f);
     glClear(GL_COLOR_BUFFER_BIT_);
@@ -685,14 +1145,13 @@ void GlesRenderBackend::emit_quad(const float x0, const float y0,
                                   const float x1, const float y1,
                                   const float u0, const float v0,
                                   const float u1, const float v1,
-                                  const float col[4])
+                                  const float col[4], GLfloat_* verts)
 {
     // 6 顶点（SDL rect_index_order {0,1,2,0,2,3} 的两三角形布局，
     // 顶点序 (minx,miny) (maxx,miny) (maxx,maxy) (minx,maxy)）
     const float xy[4][2] = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
     const float uv[4][2] = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}};
     const int order[6] = {0, 1, 2, 0, 2, 3};
-    GLfloat_ verts[6 * 8];
     for (int i = 0; i < 6; ++i) {
         const int k = order[i];
         GLfloat_* v = verts + i * 8;
@@ -705,21 +1164,17 @@ void GlesRenderBackend::emit_quad(const float x0, const float y0,
         v[6] = uv[k][0];
         v[7] = uv[k][1];
     }
-    glBindBuffer(GL_ARRAY_BUFFER_, vbo_);
-    glBufferData(GL_ARRAY_BUFFER_, sizeof(verts), verts, GL_DYNAMIC_DRAW_);
-    glBindVertexArray(vao_);
-    glDrawArrays(GL_TRIANGLES_, 0, 6);
-    glBindVertexArray(0);
 }
 
 void GlesRenderBackend::fill_rect(const FRect& dst)
 {
     if (!gl_context_) return;
-    apply_draw_state(nullptr, draw_blend_);
     const float col[4] = {draw_color_[0] / 255.0f, draw_color_[1] / 255.0f,
                           draw_color_[2] / 255.0f, draw_color_[3] / 255.0f};
-    glUniform1i(loc_usetex_, 0);
-    emit_quad(dst.x, dst.y, dst.x + dst.w, dst.y + dst.h, 0, 0, 0, 0, col);
+    GLfloat_ verts[6 * 8];
+    emit_quad(dst.x, dst.y, dst.x + dst.w, dst.y + dst.h, 0, 0, 0, 0, col,
+              verts);
+    batch_append(nullptr, draw_blend_, verts, 6);
 }
 
 void GlesRenderBackend::draw_texture(TextureRef t, const FRect* src,
@@ -728,7 +1183,6 @@ void GlesRenderBackend::draw_texture(TextureRef t, const FRect* src,
     if (!gl_context_) return;
     GlesTexture* gt = gles_tex(t);
     if (!gt || !gt->tex || !dst) return;
-    apply_draw_state(gt, gt->blend);
     const float tw = float(gt->w), th = float(gt->h);
     float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
     if (src && src->w > 0 && src->h > 0) {
@@ -740,11 +1194,10 @@ void GlesRenderBackend::draw_texture(TextureRef t, const FRect* src,
     const float col[4] = {gt->color_mod[0] / 255.0f, gt->color_mod[1] / 255.0f,
                           gt->color_mod[2] / 255.0f,
                           gt->alpha_mod / 255.0f};
-    glActiveTexture(0x84C0); // GL_TEXTURE0
-    glBindTexture(GL_TEXTURE_2D_, gt->tex);
-    glUniform1i(loc_usetex_, 1);
+    GLfloat_ verts[6 * 8];
     emit_quad(dst->x, dst->y, dst->x + dst->w, dst->y + dst->h, u0, v0, u1, v1,
-              col);
+              col, verts);
+    batch_append(gt, gt->blend, verts, 6);
 }
 
 void GlesRenderBackend::draw_texture_affine(TextureRef t, const FRect* src,
@@ -754,7 +1207,6 @@ void GlesRenderBackend::draw_texture_affine(TextureRef t, const FRect* src,
     if (!gl_context_) return;
     GlesTexture* gt = gles_tex(t);
     if (!gt || !gt->tex) return;
-    apply_draw_state(gt, gt->blend);
     const float tw = float(gt->w), th = float(gt->h);
     float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
     if (src && src->w > 0 && src->h > 0) {
@@ -771,9 +1223,6 @@ void GlesRenderBackend::draw_texture_affine(TextureRef t, const FRect* src,
     const float qy[4] = {o.y, r.y, r.y + d.y - o.y, d.y};
     const float qu[4] = {u0, u1, u1, u0};
     const float qv[4] = {v0, v0, v1, v1};
-    glActiveTexture(0x84C0);
-    glBindTexture(GL_TEXTURE_2D_, gt->tex);
-    glUniform1i(loc_usetex_, 1);
     GLfloat_ verts[6 * 8];
     const int order[6] = {0, 1, 2, 0, 2, 3};
     for (int i = 0; i < 6; ++i) {
@@ -783,11 +1232,7 @@ void GlesRenderBackend::draw_texture_affine(TextureRef t, const FRect* src,
         v[2] = col[0]; v[3] = col[1]; v[4] = col[2]; v[5] = col[3];
         v[6] = qu[k]; v[7] = qv[k];
     }
-    glBindBuffer(GL_ARRAY_BUFFER_, vbo_);
-    glBufferData(GL_ARRAY_BUFFER_, sizeof(verts), verts, GL_DYNAMIC_DRAW_);
-    glBindVertexArray(vao_);
-    glDrawArrays(GL_TRIANGLES_, 0, 6);
-    glBindVertexArray(0);
+    batch_append(gt, gt->blend, verts, 6);
 }
 
 void GlesRenderBackend::draw_geometry(TextureRef t, const Vertex* verts,
@@ -797,7 +1242,6 @@ void GlesRenderBackend::draw_geometry(TextureRef t, const Vertex* verts,
     if (!gl_context_) return;
     GlesTexture* gt = gles_tex(t);
     if (!gt || !gt->tex || nverts <= 0 || !verts) return;
-    apply_draw_state(gt, gt->blend);
     const int count = (indices && nindices > 0) ? nindices : nverts;
     if (count <= 0) return;
     std::vector<GLfloat_> buf(size_t(count) * 8);
@@ -813,15 +1257,7 @@ void GlesRenderBackend::draw_geometry(TextureRef t, const Vertex* verts,
         v[4] = sv.color.b; v[5] = sv.color.a;
         v[6] = sv.uv.x;    v[7] = sv.uv.y;
     }
-    glActiveTexture(0x84C0);
-    glBindTexture(GL_TEXTURE_2D_, gt->tex);
-    glUniform1i(loc_usetex_, 1);
-    glBindBuffer(GL_ARRAY_BUFFER_, vbo_);
-    glBufferData(GL_ARRAY_BUFFER_, GLsizeiptr_(buf.size() * sizeof(GLfloat_)),
-                 buf.data(), GL_DYNAMIC_DRAW_);
-    glBindVertexArray(vao_);
-    glDrawArrays(GL_TRIANGLES_, 0, (GLsizei_)count);
-    glBindVertexArray(0);
+    batch_append(gt, gt->blend, buf.data(), count);
 }
 
 bool GlesRenderBackend::draw_rule_transition(TextureRef capture,
@@ -837,8 +1273,10 @@ bool GlesRenderBackend::draw_rule_transition(TextureRef capture,
     GlesTexture* rl = gles_tex(rule);
     if (!cap || !cap->tex || !rl || !rl->tex) return false;
     if (!ensure_rule_program()) return false;
-    apply_draw_state(nullptr, BlendMode::Blend); // blend/scissor/scale/off
+    flush_batch(); // 排队的场景绘制先于 rule 溶解落地
+    apply_draw_state(nullptr, BlendMode::Blend, clip_enabled_, clip_);
     glUseProgram(rule_program_);
+    gl_cur_program_ = rule_program_;
     glUniform2f(rule_loc_scale_, last_scale_[0], last_scale_[1]);
     glUniform2f(rule_loc_off_, last_off_[0], last_off_[1]);
     glUniform1f(rule_loc_progress_, progress);
@@ -850,25 +1288,37 @@ bool GlesRenderBackend::draw_rule_transition(TextureRef capture,
     glBindTexture(GL_TEXTURE_2D_, rl->tex);
     glUniform1i(rule_loc_urule_, 1);
     glActiveTexture(GL_TEXTURE0_);
+    gl_bound_tex_ = cap->tex; // 主 program 路径的绑定缓存同步
     const float col[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // 顶点色未参与 rule 求值
     const float w = float(cur_target_->w), h = float(cur_target_->h);
-    emit_quad(0.0f, 0.0f, w, h, 0.0f, 0.0f, 1.0f, 1.0f, col);
-    glUseProgram(program_); // 后续普通绘制各自 apply_draw_state；这里归位
+    GLfloat_ verts[6 * 8];
+    emit_quad(0.0f, 0.0f, w, h, 0.0f, 0.0f, 1.0f, 1.0f, col, verts);
+    glBindBuffer(GL_ARRAY_BUFFER_, vbo_);
+    glBufferData(GL_ARRAY_BUFFER_, sizeof(verts), verts, GL_DYNAMIC_DRAW_);
+    glBindVertexArray(vao_);
+    glDrawArrays(GL_TRIANGLES_, 0, 6);
+    glBindVertexArray(0);
+    glUseProgram(program_); // 后续 flush 的 program 去重缓存同步
+    gl_cur_program_ = program_;
     return true;
 }
 
 void GlesRenderBackend::present()
 {
     if (!gl_context_) return;
-    // GL 错误 canary（OA_RENDER_DIAG 的后端错误面）：每帧 drain 一次
-    // glGetError；有错则记录到 err_（呈现帧内发生的 GL 错误会在这里现身）。
-    for (;;) {
+    flush_batch();
+    ensure_window_ready();
+    // GL 错误 canary（OA_RENDER_DIAG 的后端错误面）：仅诊断开关打开时
+    // drain——部分 ARM 驱动上 glGetError 触发隐式同步，出厂路径每帧
+    // 白付一次（docs/PERFORMANCE_OPTIMIZATION_PLAN.md §1.2）。
+    static const bool diag = std::getenv("OA_RENDER_DIAG") != nullptr;
+    if (diag) {
         const GLenum_ e = glGetError();
-        if (e == GL_NO_ERROR_) break;
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "gles: GL error 0x%x", (unsigned)e);
-        err_ = buf; // 保留最后一条（下一个 present 前不再覆盖）
-        break;
+        if (e != GL_NO_ERROR_) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "gles: GL error 0x%x", (unsigned)e);
+            err_ = buf; // 保留最后一条（下一个 present 前不再覆盖）
+        }
     }
     SDL_GL_SwapWindow(window_);
     // present 后引擎把 target 切回 stage FBO（render_end 尾部）；无需复位。
@@ -881,13 +1331,14 @@ void GlesRenderBackend::present()
 TextureRef GlesRenderBackend::create_texture(int w, int h,
                                              TextureAccess access)
 {
-    if (!gl_context_ || w <= 0 || h <= 0) return nullptr;
+    if (!gl_context_ || w <= 0 || h <= 0 || w > 8192 || h > 8192) return nullptr;
     GlesTexture* gt = new GlesTexture();
     gt->w = w;
     gt->h = h;
     gt->access = access;
     glGenTextures(1, &gt->tex);
     glBindTexture(GL_TEXTURE_2D_, gt->tex);
+    gl_bound_tex_ = gt->tex;
     glTexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA8_, w, h, 0, GL_RGBA_,
                  GL_UNSIGNED_BYTE_, nullptr);
     // 无 mipmap（sdl 线默认 scale mode = LINEAR，SDL GL 驱动同配置）
@@ -909,12 +1360,12 @@ TextureRef GlesRenderBackend::create_texture(int w, int h,
             glBindFramebuffer(GL_FRAMEBUFFER_, 0);
             glDeleteFramebuffers(1, &gt->fbo);
             glDeleteTextures(1, &gt->tex);
+            gl_bound_tex_ = 0;
             delete gt;
             return nullptr;
         }
         glBindFramebuffer(GL_FRAMEBUFFER_, 0);
     }
-    glBindTexture(GL_TEXTURE_2D_, 0);
     return gt;
 }
 
@@ -923,11 +1374,17 @@ void GlesRenderBackend::destroy_texture(TextureRef t)
     if (!t) return;
     GlesTexture* gt = static_cast<GlesTexture*>(t);
     if (gt == cur_target_) cur_target_ = nullptr;
+    if (batch_tex_ == gt) { // 排队绘制引用了它：先落地再销毁
+        flush_batch();
+        batch_tex_ = nullptr;
+        batch_key_valid_ = false;
+    }
     if (gl_context_) { // 后端 shutdown 后的销毁（字形纹理随 FontSystem 晚于
         // release_all 析构）只能释放包装——GL 对象已随上下文销毁。
         // （SDL 端同路径靠 SDL3 对象校验 no-op；GLES 必须显式守卫。）
         if (gt->fbo) glDeleteFramebuffers(1, &gt->fbo);
         if (gt->tex) glDeleteTextures(1, &gt->tex);
+        if (gl_bound_tex_ == gt->tex) gl_bound_tex_ = 0;
     }
     delete gt;
 }
@@ -938,14 +1395,40 @@ void GlesRenderBackend::update_texture(TextureRef t, const uint8_t* rgba,
     if (!gl_context_) return;
     GlesTexture* gt = gles_tex(t);
     if (!gt || !gt->tex || !rgba) return;
+    if (batch_tex_ == gt) flush_batch(); // 排队绘制引用旧内容，先落地
+    const int row_bytes = gt->w * 4;
+    if (pitch < row_bytes) return;
     glBindTexture(GL_TEXTURE_2D_, gt->tex);
+    gl_bound_tex_ = gt->tex;
     glPixelStorei(GL_UNPACK_ALIGNMENT_, 1);
-    if (pitch != gt->w * 4) glPixelStorei(GL_UNPACK_ROW_LENGTH_, pitch / 4);
+    if (pitch != row_bytes) glPixelStorei(GL_UNPACK_ROW_LENGTH_, pitch / 4);
     glTexSubImage2D(GL_TEXTURE_2D_, 0, 0, 0, gt->w, gt->h, GL_RGBA_,
                     GL_UNSIGNED_BYTE_, rgba);
     glPixelStorei(GL_UNPACK_ROW_LENGTH_, 0);
     glPixelStorei(GL_UNPACK_ALIGNMENT_, 4);
-    glBindTexture(GL_TEXTURE_2D_, 0);
+}
+
+bool GlesRenderBackend::update_texture_region(TextureRef t, int x, int y,
+                                              int w, int h,
+                                              const uint8_t* rgba, int pitch)
+{
+    if (!gl_context_) return false;
+    GlesTexture* gt = gles_tex(t);
+    if (!gt || !gt->tex || !rgba) return false;
+    if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > gt->w || y + h > gt->h)
+        return false;
+    if (batch_tex_ == gt) flush_batch();
+    const int row_bytes = w * 4;
+    if (pitch < row_bytes) return false;
+    glBindTexture(GL_TEXTURE_2D_, gt->tex);
+    gl_bound_tex_ = gt->tex;
+    glPixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    if (pitch != row_bytes) glPixelStorei(GL_UNPACK_ROW_LENGTH_, pitch / 4);
+    glTexSubImage2D(GL_TEXTURE_2D_, 0, (GLint_)x, (GLint_)y, (GLsizei_)w,
+                    (GLsizei_)h, GL_RGBA_, GL_UNSIGNED_BYTE_, rgba);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH_, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT_, 4);
+    return true;
 }
 
 bool GlesRenderBackend::lock_texture(TextureRef t, uint8_t** pixels,
@@ -1006,6 +1489,7 @@ bool GlesRenderBackend::read_target(int* w, int* h,
                                     std::vector<uint8_t>* rgba)
 {
     if (!gl_context_) return false;
+    flush_batch(); // 读回必须包含所有已排队绘制
     if (!cur_target_) {
         // 窗口：读 letterbox dst 内容区（SDL 窗口 readback 语义：
         // y 翻行读 + 行序翻转 → top-down）
@@ -1043,7 +1527,11 @@ bool GlesRenderBackend::read_target(int* w, int* h,
 bool GlesRenderBackend::window_to_render(float wx, float wy, float* rx,
                                          float* ry)
 {
+    if (dst_w_ <= 0.0f || dst_h_ <= 0.0f || logical_w_ <= 0 || logical_h_ <= 0)
+        return false;
+    ensure_window_ready();
     // SDL_RenderCoordinatesFromWindow 数学镜像（main_view viewport 0, scale 1）
+    // KR2: window → drawable, then subtract letterbox origin / scale.
     float x = wx * dpi_x_;
     float y = wy * dpi_y_;
     const float lw = float(logical_w_), lh = float(logical_h_);
@@ -1057,13 +1545,32 @@ bool GlesRenderBackend::window_to_render(float wx, float wy, float* rx,
 bool GlesRenderBackend::render_to_window(float rx, float ry, float* wx,
                                          float* wy)
 {
-    // SDL_RenderCoordinatesToWindow 数学镜像
+    if (dst_w_ <= 0.0f || dst_h_ <= 0.0f || logical_w_ <= 0 || logical_h_ <= 0)
+        return false;
+    ensure_window_ready();
     float x = rx, y = ry;
     const float lw = float(logical_w_), lh = float(logical_h_);
     x = dst_x_ + x * dst_w_ / lw;
     y = dst_y_ + y * dst_h_ / lh;
-    if (wx) *wx = x / dpi_x_;
-    if (wy) *wy = y / dpi_y_;
+    if (wx) *wx = dpi_x_ > 0.0f ? x / dpi_x_ : x;
+    if (wy) *wy = dpi_y_ > 0.0f ? y / dpi_y_ : y;
+    return true;
+}
+
+void GlesRenderBackend::note_window_size(int w, int h)
+{
+    if (w > 1 && h > 1) {
+        noted_w_ = w;
+        noted_h_ = h;
+    }
+}
+
+bool GlesRenderBackend::present_size(int* w, int* h)
+{
+    ensure_window_ready();
+    if (out_w_ <= 1 || out_h_ <= 1) return false;
+    if (w) *w = out_w_;
+    if (h) *h = out_h_;
     return true;
 }
 

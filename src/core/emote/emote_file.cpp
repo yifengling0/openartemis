@@ -627,11 +627,19 @@ const EmoteIcon* EmoteFile::find_icon(const EmoteSource& src, const std::string&
 
 bool EmoteFile::ensure_atlas(EmoteSource* src, std::string* err) const {
     if (src->rgbaDecoded) return true;
+    if (src->textureWidth <= 0 || src->textureHeight <= 0 ||
+        src->textureWidth > 8192 || src->textureHeight > 8192)
+        return false;
     std::span<const uint8_t> bytes;
     if (src->pixelChunk < 0 ||
         !psb_.chunk_bytes(size_t(src->pixelChunk), src->pixelExtra, &bytes))
         return false;
     if (src->textureType == "DXT5") {
+        if (src->textureWidth % 4 != 0 || src->textureHeight % 4 != 0)
+            return false;
+        const size_t need =
+            (size_t(src->textureWidth) / 4) * (size_t(src->textureHeight) / 4) * 16;
+        if (bytes.size() < need) return false;
         if (!decode_bc3(bytes.data(), src->textureWidth, src->textureHeight, &src->rgba))
             return false;
     } else if (src->textureType == "BC7") {

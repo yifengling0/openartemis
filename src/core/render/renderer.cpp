@@ -1,6 +1,8 @@
 #include "core/render/renderer.h"
 #include "core/render/backend_gles.h"
+#ifndef OA_USE_SDL2
 #include "core/render/backend_sdl.h"
+#endif
 #include "core/emote/emote_file.h"
 #include <cstdio>
 #include <cstdlib>
@@ -64,11 +66,17 @@ bool RenderEngine::create_renderer(SDL_Window* ctx,
     // 后端接入点（唯一）：--renderer / OA_RENDERER 选线；缺省 = sdl（与
     // HEAD 行为逐位一致）。gles 不可用（无 GLES 上下文等）→ create false +
     // last_error，宿主报错退出——不静默降级。
+#ifdef OA_USE_SDL2
+    const std::string kind = backend_kind.empty() ? "gles" : backend_kind;
+#else
     const std::string kind = backend_kind.empty() ? "sdl" : backend_kind;
+#endif
     if (kind == "gles") {
         backend_ = std::make_unique<GlesRenderBackend>();
+#ifndef OA_USE_SDL2
     } else if (kind == "sdl") {
         backend_ = std::make_unique<SdlRenderBackend>();
+#endif
     } else {
         std::fprintf(stderr,
                      "openartemis: unknown render backend '%s' (sdl|gles)\n",
@@ -77,7 +85,8 @@ bool RenderEngine::create_renderer(SDL_Window* ctx,
     }
     BackendInfo info;
     if (!backend_->create(ctx, stage_w_, stage_h_, &info)) {
-        // 失败时渲染器保持 null（renderer_ok()=false）；等价复位。
+        if (backend_->last_error() && backend_->last_error()[0])
+            SDL_SetError("%s", backend_->last_error());
         backend_.reset();
         return false;
     }
@@ -250,6 +259,8 @@ bool RenderEngine::read_window_surface(oa::media::Image& out)
 
 TextureRef RenderEngine::make_texture(const oa::media::Image& img)
 {
+    if (img.w <= 0 || img.h <= 0) return nullptr;
+    if (img.rgba.size() < size_t(img.w) * size_t(img.h) * 4) return nullptr;
     TextureRef tex = backend_->create_texture(img.w, img.h,
                                               TextureAccess::Static);
     if (!tex) return nullptr;
@@ -285,6 +296,16 @@ double RenderEngine::frame_luma()
 bool RenderEngine::get_renderer_coordinates(float winx, float winy, float* rx, float* ry)
 {
     return backend_ && backend_->window_to_render(winx, winy, rx, ry);
+}
+
+void RenderEngine::note_window_size(int w, int h)
+{
+    if (backend_) backend_->note_window_size(w, h);
+}
+
+bool RenderEngine::present_size(int* w, int* h)
+{
+    return backend_ && backend_->present_size(w, h);
 }
 
 bool RenderEngine::stage_to_window_coordinates(float sx, float sy, float* wx, float* wy)
@@ -697,6 +718,9 @@ const oa::media::Image* RenderEngine::resolve_image(const std::string& name)
     if (name.empty()) return nullptr;
     const auto it = decoded.find(name);
     if (it != decoded.end()) return &it->second;
+    // 负缓存：缺失/解码失败的资产每帧重探测（3 候选 × 2 文件系统面，
+    // 全程 PhysFS 全局锁）是缺图层的稳态热点（PERFORMANCE_PLAN §2.1）。
+    if (decoded_miss_.count(name)) return nullptr;
     std::string resolved = rt_->interpreter().resolve_magic_path(name);
     std::optional<std::vector<uint8_t>> bytes;
     // Extension-less layer files probe the real archive formats:
@@ -714,9 +738,15 @@ const oa::media::Image* RenderEngine::resolve_image(const std::string& name)
             break;
         }
     }
-    if (!bytes) return nullptr;
+    if (!bytes) {
+        decoded_miss_.insert(name);
+        return nullptr;
+    }
     oa::media::Image img;
-    if (!oa::media::decode_image(*bytes, img)) return nullptr;
+    if (!oa::media::decode_image(*bytes, img)) {
+        decoded_miss_.insert(name);
+        return nullptr;
+    }
     decoded[name] = std::move(img);
     std::printf("[app] texture: %s (%dx%d)\n", resolved.c_str(), decoded[name].w,
         decoded[name].h);
@@ -875,8 +905,20 @@ bool RenderEngine::upload_host_frame(const oa::render::TextureKey& key, int w, i
     // upload's pixels. Draw refetches textures by key per frame, so the
     // object churn is invisible to callers; per-frame video/emote textures
     // refresh at their channel rate (30/s at most).
+    //
+    // 性能（PERFORMANCE_PLAN §1.3）：每帧重建 = 驱动侧全尺寸纹理分配 +
+    // 拷贝（1920×1080 RGBA ≈ 8MB/帧）。上述 in-place 失效观测来自 sdl
+    // 软件渲染线；GLES 的 glTexSubImage2D 路径可靠，故按后端能力分流
+    // （inplace_streaming_update）：同尺寸直接子更新，尺寸变化才重建。
     const auto it = textures.find(key);
     if (it != textures.end()) {
+        float tw = 0, th = 0;
+        if (backend_->inplace_streaming_update() &&
+            backend_->texture_size(it->second, &tw, &th) &&
+            int(tw) == w && int(th) == h) {
+            backend_->update_texture(it->second, rgba, w * 4);
+            return true;
+        }
         backend_->destroy_texture(it->second);
         textures.erase(it);
     }

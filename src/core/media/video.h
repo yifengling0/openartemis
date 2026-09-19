@@ -335,7 +335,10 @@ private:
     /// Retire a channel's pipe worker (sync decode takes over).
     void cancel_pipe(DecodeState& ds);
     /// Spawn the decode-pool pipe worker for a fresh decode state.
-    void start_pipe(DecodeState& ds, const std::string& file, bool loop_play);
+    /// `bytes` is the already-loaded main file (the worker must not call
+    /// loader_ / PhysicsFS — that API is not thread-safe).
+    void start_pipe(DecodeState& ds, bool loop_play,
+                    std::shared_ptr<const std::vector<uint8_t>> bytes);
     /// deterministic movie-stream flush. The movie stream is
     /// shared by every audio-bearing video channel (the audio-bearing split), so
     /// the flush only runs when no OTHER playing channel still feeds it

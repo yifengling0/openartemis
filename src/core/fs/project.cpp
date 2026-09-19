@@ -149,32 +149,39 @@ Project Project::open(const fs::IFileSystem& fs, std::string_view platform) {
         const std::string want = IniFile::uppercase(platform);
         section_name = want;
     }
-    // ASCII scan for charset within the target section.
+    // ASCII scan for charset within the target section, then WINDOWS/ANDROID
+    // so a phone host can still decode a PC-only system.ini.
     std::string charset = "Shift_JIS";
     {
         const std::string text(bytes->begin(), bytes->end());
-        const std::string mark = "[" + section_name + "]";
-        const size_t sec = text.find(mark);
-        if (sec != std::string::npos) {
+        const std::string marks[] = {
+            "[" + section_name + "]",
+            "[WINDOWS]",
+            "[ANDROID]",
+        };
+        for (const std::string& mark : marks) {
+            const size_t sec = text.find(mark);
+            if (sec == std::string::npos) continue;
             size_t next = text.find('[', sec + mark.size());
             const std::string_view body =
                 std::string_view(text).substr(sec, next == std::string::npos ? text.size() - sec
                                                                              : next - sec);
             const size_t cs = body.find("CHARSET");
-            if (cs != std::string_view::npos) {
-                const size_t eq = body.find('=', cs);
-                if (eq != std::string_view::npos) {
-                    size_t b = eq + 1;
-                    while (b < body.size() && (body[b] == ' ' || body[b] == '\t')) ++b;
-                    size_t e = b;
-                    while (e < body.size() && body[e] != '\r' && body[e] != '\n' &&
-                           body[e] != ';') {
-                        ++e;
-                    }
-                    std::string v(body.substr(b, e - b));
-                    while (!v.empty() && v.back() == ' ') v.pop_back();
-                    if (!v.empty()) charset = v;
-                }
+            if (cs == std::string_view::npos) continue;
+            const size_t eq = body.find('=', cs);
+            if (eq == std::string_view::npos) continue;
+            size_t b = eq + 1;
+            while (b < body.size() && (body[b] == ' ' || body[b] == '\t')) ++b;
+            size_t e = b;
+            while (e < body.size() && body[e] != '\r' && body[e] != '\n' &&
+                   body[e] != ';') {
+                ++e;
+            }
+            std::string v(body.substr(b, e - b));
+            while (!v.empty() && v.back() == ' ') v.pop_back();
+            if (!v.empty()) {
+                charset = v;
+                break;
             }
         }
     }
@@ -194,16 +201,28 @@ Project Project::open(const fs::IFileSystem& fs, std::string_view platform) {
     const std::string section = IniFile::uppercase(platform);
     const auto* sec = p.ini.section(section);
     if (!sec) {
+        static const char* kFallbacks[] = {"WINDOWS", "ANDROID", "IPHONE"};
+        for (const char* fb : kFallbacks) {
+            if (IniFile::uppercase(fb) == section) continue;
+            sec = p.ini.section(fb);
+            if (sec) break;
+        }
+    }
+    if (!sec && !p.ini.sections.empty()) {
+        sec = &p.ini.sections.front();
+    }
+    if (!sec) {
         throw std::runtime_error("system.ini has no section [" + section + "] for platform " +
                                  std::string(platform));
     }
+    const std::string used_section = sec->name;
     c.platform = lower_ascii(platform);
     c.env = sec->kv;
 
     const auto need = [&](const char* key) -> std::string {
         const std::string* v = sec->find(key);
         if (!v) {
-            throw std::runtime_error(std::string("system.ini [") + section + "] missing " +
+            throw std::runtime_error(std::string("system.ini [") + used_section + "] missing " +
                                      key);
         }
         return *v;
@@ -211,19 +230,19 @@ Project Project::open(const fs::IFileSystem& fs, std::string_view platform) {
     c.stage_width = parse_int(need("WIDTH"), 1280);
     c.stage_height = parse_int(need("HEIGHT"), 720);
     c.boot_script = need("BOOT");
-    c.fps = parse_int(ini_get(p.ini, section, "FPS"), 60);
-    const std::string cs = ini_get(p.ini, section, "CHARSET", "");
+    c.fps = parse_int(ini_get(p.ini, used_section, "FPS"), 60);
+    const std::string cs = ini_get(p.ini, used_section, "CHARSET", "");
     if (!cs.empty()) c.charset = cs;
-    c.savepath = ini_get(p.ini, section, "SAVEPATH");
-    c.title = ini_get(p.ini, section, "TITLE");
-    c.frameless = parse_bool(ini_get(p.ini, section, "FRAMELESS"));
-    c.resizable = parse_bool(ini_get(p.ini, section, "RESIZABLE"));
+    c.savepath = ini_get(p.ini, used_section, "SAVEPATH");
+    c.title = ini_get(p.ini, used_section, "TITLE");
+    c.frameless = parse_bool(ini_get(p.ini, used_section, "FRAMELESS"));
+    c.resizable = parse_bool(ini_get(p.ini, used_section, "RESIZABLE"));
     c.fixed_aspect_ratio =
-        parse_bool(ini_get(p.ini, section, "FIXED_ASPECT_RATIO"));
-    c.sidecut = parse_bool(ini_get(p.ini, section, "SIDECUT"));
-    c.power_saving = parse_bool(ini_get(p.ini, section, "POWER_SAVING"));
-    c.no_save = parse_bool(ini_get(p.ini, section, "NO_SAVE"));
-    c.side_picture = ini_get(p.ini, section, "SIDE_PICTURE");
+        parse_bool(ini_get(p.ini, used_section, "FIXED_ASPECT_RATIO"));
+    c.sidecut = parse_bool(ini_get(p.ini, used_section, "SIDECUT"));
+    c.power_saving = parse_bool(ini_get(p.ini, used_section, "POWER_SAVING"));
+    c.no_save = parse_bool(ini_get(p.ini, used_section, "NO_SAVE"));
+    c.side_picture = ini_get(p.ini, used_section, "SIDE_PICTURE");
     c.prevent_multiple_process_set =
         sec->find("PREVENT_MULTIPLE_PROCESS") != nullptr;
     return p;

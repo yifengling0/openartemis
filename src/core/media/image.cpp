@@ -1,8 +1,8 @@
 #include "core/media/image.h"
 
 #include <csetjmp>
+#include <cstdio>
 #include <cstring>
-#include <stdexcept>
 
 extern "C" {
 #include <png.h>
@@ -14,18 +14,21 @@ namespace oa::media {
 
 namespace {
 
-/// libjpeg error sink: default error_exit calls exit(); route it through a
-/// longjmp so corrupt/truncated JPEGs fail decode_image() instead of killing
-/// the process (same contract as decode_png returning false).
+/// libjpeg error sink: default error_exit calls exit(). Route it through
+/// longjmp (not a C++ throw): libjpeg is a C library without unwind tables,
+/// and throwing through those frames corrupts the heap (STATUS_HEAP_CORRUPTION
+/// after a bad/truncated JPEG — common on the first-scene asset burst after
+/// 开始游戏).
 struct JpegErrorSink {
     jpeg_error_mgr pub;
+    jmp_buf jump;
     char message[JMSG_LENGTH_MAX] = {};
 };
 
 void jpeg_error_exit(j_common_ptr cinfo) {
     JpegErrorSink* sink = reinterpret_cast<JpegErrorSink*>(cinfo->err);
     sink->pub.format_message(cinfo, sink->message);
-    throw std::runtime_error(sink->message);
+    longjmp(sink->jump, 1);
 }
 
 void jpeg_output_message(j_common_ptr cinfo) {
@@ -36,64 +39,62 @@ void jpeg_output_message(j_common_ptr cinfo) {
 }
 
 bool decode_jpeg(const std::vector<uint8_t>& bytes, Image& out) {
-    JpegErrorSink sink;
+    JpegErrorSink sink{};
     jpeg_decompress_struct cinfo{};
     cinfo.err = jpeg_std_error(&sink.pub);
     sink.pub.error_exit = jpeg_error_exit;
     sink.pub.output_message = jpeg_output_message;
-    try {
-        jpeg_create_decompress(&cinfo);
-        jpeg_mem_src(&cinfo, bytes.data(), static_cast<unsigned long>(bytes.size()));
-        if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
-            std::fprintf(stderr, "jpeg decode failed: invalid header\n");
-            jpeg_destroy_decompress(&cinfo);
-            return false;
-        }
-        cinfo.out_color_space = JCS_RGB; // libjpeg expands gray/CMYK sources
-        jpeg_start_decompress(&cinfo);
-        const JDIMENSION w = cinfo.output_width;
-        const JDIMENSION h = cinfo.output_height;
-        const int comp = cinfo.output_components; // JCS_RGB -> 3
-        if (w == 0 || h == 0 || w > 16384 || h > 16384 || comp <= 0 || comp > 4) {
-            jpeg_abort_decompress(&cinfo);
-            jpeg_destroy_decompress(&cinfo);
-            std::fprintf(stderr, "jpeg decode failed: bad geometry %ux%u c=%d\n",
-                         static_cast<unsigned>(w), static_cast<unsigned>(h), comp);
-            return false;
-        }
-        out.w = static_cast<int>(w);
-        out.h = static_cast<int>(h);
-        out.rgba.assign(size_t(out.w) * size_t(out.h) * 4, 0);
-        std::vector<uint8_t> row(size_t(w) * size_t(comp));
-        while (cinfo.output_scanline < h) {
-            JSAMPROW rows[1] = {row.data()};
-            jpeg_read_scanlines(&cinfo, rows, 1);
-            uint8_t* dst = out.rgba.data() + size_t(cinfo.output_scanline - 1) * size_t(w) * 4;
-            if (comp == 3) {
-                for (JDIMENSION x = 0; x < w; ++x) {
-                    dst[x * 4] = row[x * 3];
-                    dst[x * 4 + 1] = row[x * 3 + 1];
-                    dst[x * 4 + 2] = row[x * 3 + 2];
-                    dst[x * 4 + 3] = 255;
-                }
-            } else { // grayscale (or 4-component) safety fallback
-                for (JDIMENSION x = 0; x < w; ++x) {
-                    const uint8_t v = row[x * comp];
-                    dst[x * 4] = v;
-                    dst[x * 4 + 1] = v;
-                    dst[x * 4 + 2] = v;
-                    dst[x * 4 + 3] = 255;
-                }
-            }
-        }
-        jpeg_finish_decompress(&cinfo);
+    if (setjmp(sink.jump)) {
         jpeg_destroy_decompress(&cinfo);
+        std::fprintf(stderr, "jpeg decode failed: %s\n", sink.message);
+        return false;
     }
-    catch (const std::exception& e) {
-        std::fprintf(stderr, "jpeg decode failed: %s\n", e.what());
+    jpeg_create_decompress(&cinfo);
+    jpeg_mem_src(&cinfo, bytes.data(), static_cast<unsigned long>(bytes.size()));
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        std::fprintf(stderr, "jpeg decode failed: invalid header\n");
         jpeg_destroy_decompress(&cinfo);
         return false;
     }
+    cinfo.out_color_space = JCS_RGB; // libjpeg expands gray/CMYK sources
+    jpeg_start_decompress(&cinfo);
+    const JDIMENSION w = cinfo.output_width;
+    const JDIMENSION h = cinfo.output_height;
+    const int comp = cinfo.output_components; // JCS_RGB -> 3
+    if (w == 0 || h == 0 || w > 16384 || h > 16384 || comp <= 0 || comp > 4) {
+        jpeg_abort_decompress(&cinfo);
+        jpeg_destroy_decompress(&cinfo);
+        std::fprintf(stderr, "jpeg decode failed: bad geometry %ux%u c=%d\n",
+                     static_cast<unsigned>(w), static_cast<unsigned>(h), comp);
+        return false;
+    }
+    out.w = static_cast<int>(w);
+    out.h = static_cast<int>(h);
+    out.rgba.assign(size_t(out.w) * size_t(out.h) * 4, 0);
+    std::vector<uint8_t> row(size_t(w) * size_t(comp));
+    while (cinfo.output_scanline < h) {
+        JSAMPROW rows[1] = {row.data()};
+        jpeg_read_scanlines(&cinfo, rows, 1);
+        uint8_t* dst = out.rgba.data() + size_t(cinfo.output_scanline - 1) * size_t(w) * 4;
+        if (comp == 3) {
+            for (JDIMENSION x = 0; x < w; ++x) {
+                dst[x * 4] = row[x * 3];
+                dst[x * 4 + 1] = row[x * 3 + 1];
+                dst[x * 4 + 2] = row[x * 3 + 2];
+                dst[x * 4 + 3] = 255;
+            }
+        } else { // grayscale (or 4-component) safety fallback
+            for (JDIMENSION x = 0; x < w; ++x) {
+                const uint8_t v = row[x * comp];
+                dst[x * 4] = v;
+                dst[x * 4 + 1] = v;
+                dst[x * 4 + 2] = v;
+                dst[x * 4 + 3] = 255;
+            }
+        }
+    }
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
     return true;
 }
 
@@ -113,10 +114,23 @@ bool decode_png(const std::vector<uint8_t>& bytes, Image& out) {
         std::fprintf(stderr, "png decode failed: %s\n", png.message);
         return false;
     }
+    if (png.width == 0 || png.height == 0 || png.width > 16384 || png.height > 16384) {
+        std::fprintf(stderr, "png decode failed: bad geometry %ux%u\n",
+                     static_cast<unsigned>(png.width), static_cast<unsigned>(png.height));
+        png_image_free(&png);
+        return false;
+    }
     png.format = PNG_FORMAT_RGBA;
+    const size_t need = PNG_IMAGE_SIZE(png);
+    if (need == 0 || need / 4 != size_t(png.width) * size_t(png.height)) {
+        std::fprintf(stderr, "png decode failed: size overflow %ux%u\n",
+                     static_cast<unsigned>(png.width), static_cast<unsigned>(png.height));
+        png_image_free(&png);
+        return false;
+    }
     out.w = (int)png.width;
     out.h = (int)png.height;
-    out.rgba.resize(PNG_IMAGE_SIZE(png));
+    out.rgba.resize(need);
     if (!png_image_finish_read(&png, nullptr, out.rgba.data(), 0, nullptr)) {
         png_image_free(&png);
         return false;

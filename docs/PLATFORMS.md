@@ -4,6 +4,8 @@
 `src/app/platform/`（`Platform.h` 定义的 `oa::plat` 面，research/74/78/79）与
 两个壳目录 `android/`、`web/`。
 
+VintagePomelo **HarmonyOS 原生**（`libopenartemis.so` + `engine_loader`）不在本文范围内，见 `docs/HARMONY_NATIVE_HANDOVER.md`。
+
 | 目标 | 入口 | 存档根默认 | 数据源 |
 |---|---|---|---|
 | 桌面 (linux/windows) | `openartemis`（+ `openartemis_test`） | 游戏数据所在目录 | 命令行/`OA_PFS` |

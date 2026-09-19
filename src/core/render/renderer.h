@@ -78,6 +78,8 @@ public:
     // independent) and return its luma.
     double frame_luma();
     bool get_renderer_coordinates(float winx, float winy, float* rx, float* ry);
+    void note_window_size(int w, int h);
+    bool present_size(int* w, int* h);
     /// Stage (logical render) coordinates -> window coordinates: inverse of
     /// get_renderer_coordinates, including the letterbox logical
     /// presentation. Used to warp the OS pointer onto a stage point (the
@@ -384,6 +386,9 @@ private:
 	// The scene lives inside GameRuntime; the host
 	// only READS it for rendering and hit dispatch.
 	std::map<std::string, oa::media::Image> decoded;
+	// 负缓存：resolve_image 探测/解码失败的名字（生命周期同 decoded——
+	// 两者都不淘汰；资产集合运行期不变）。
+	std::set<std::string> decoded_miss_;
 	// 纹理缓存按 TextureKey 域分桶 —— 资源文件(Asset)与
 	// 宿主供帧(VideoFrame/EmoteCanvas/OverlayFrame)结构性分开,撞名不可能,
 	// 不再需要保留命名空间拼写。

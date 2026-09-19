@@ -1,18 +1,25 @@
 // openartemis — SDL3 host (M5b integration): boots GameRuntime on a real PFS
 // project, ticks with SDL input, and renders the Lua-driven layer events
 // through oa::render::Compositor (textures resolved via magic paths + .png).
+#ifndef OA_USE_SDL2
 #define SDL_MAIN_USE_CALLBACKS
+#endif
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_video.h>
+#ifdef OA_USE_SDL2
+#include <SDL.h>
+#endif
 #include <algorithm>
 #include <filesystem>
 #include <array>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -58,6 +65,16 @@
 #include "app_host.h"   // Options + AppState (shared with app_test_drive.cpp, test build only)
 #include "platform/Platform.h" // oa::plat host platform layer
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+#ifdef __OHOS__
+#include <hilog/log.h>
+#endif
+
 namespace {
 /// SDL3 keycode/scancode -> Artemis Windows virtual-key code. The FPM's
 /// keyconfig table (csv.advkey.def) is keyed by Windows VK codes (13/32/37-40
@@ -67,7 +84,7 @@ namespace {
 /// Returns 0 for keys that carry no engine key (Escape is the host quit key).
 int sdl_key_to_vk(SDL_Keycode key) {
     if (key == SDLK_ESCAPE) return 0;
-    SDL_Keymod mods = 0;
+    SDL_Keymod mods = KMOD_NONE;
     const SDL_Scancode sc = SDL_GetScancodeFromKey(key, &mods);
     if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z)
         return 'A' + (sc - SDL_SCANCODE_A);
@@ -121,9 +138,9 @@ void print_usage(const char* argv0) {
         "                       flag the demo keeps running until the window is closed,\n"
         "                       Esc is pressed, or the game itself requests exit\n"
         "                       (rt->exit_requested()).\n"
-        "  --fps N              Windowed pacing: target ~N frames/second instead of the\n"
-        "                       default ~8 ms delay + real-time delta pacing. Ignored in\n"
-        "                       --headless (which uses virtual 16 ms ticks).\n"
+        "  --fps N              Windowed tick/present cap (default 60). GLES vsync is\n"
+        "                       always on; this only changes the 1/N-second Lua+frame\n"
+        "                       grid. Ignored in --headless (virtual 16 ms ticks).\n"
         "  --headless           No window, no rendering: drive GameRuntime with virtual\n"
         "                       16 ms ticks as fast as the CPU allows. Combine with\n"
         "                       --frames for a finite run, or run it indefinitely and\n"
@@ -253,13 +270,190 @@ int parse_args(int argc, char** argv, Options& o) {
 } // namespace
 
 
+// 余量封顶（vsync 之外的剩余帧时间用 SDL_Delay 让出）。桌面线在 vsync 关
+// 或面板非 60 整数倍（90/144Hz）时靠它锁 60Hz；OHOS 此前完全靠
+// SwapInterval(1) 阻塞（一个 vblank = 一个 tick）——120Hz 面板上 Lua
+// onEnterFrame/tween/音频 pacing 全部跑 120 次/秒，是 60Hz 设计的 2 倍
+// （docs/PERFORMANCE_OPTIMIZATION_PLAN.md §3.1）。OHOS 同样启用：SwapWindow
+// 先阻塞到 vblank，再 delay 掉余量 → 逻辑帧率恒 60Hz，与桌面线逐帧等价。
+static int frame_pace_hz(const Options& o) {
+    return o.fps > 0 ? o.fps : 60;
+}
+
+static void pace_windowed_frame(int hz, Uint64 frame_start) {
+    if (hz <= 0) return;
+    static Uint64 epoch_ms = 0;
+    static uint64_t pace_i = 0;
+    static int paced_hz = 0;
+    if (paced_hz != hz) {
+        epoch_ms = 0;
+        pace_i = 0;
+        paced_hz = hz;
+    }
+    if (epoch_ms == 0) epoch_ms = frame_start;
+    ++pace_i;
+    const Uint64 due = epoch_ms + (pace_i * 1000ull) / (unsigned)hz;
+    const Uint64 now = SDL_GetTicks();
+    if (now < due) {
+        SDL_Delay((Uint32)(due - now));
+    } else if (now > due + 250) {
+        // Hitch (sync PNG decode, etc.): resync instead of a catch-up burst.
+        epoch_ms = now - (pace_i * 1000ull) / (unsigned)hz;
+    }
+}
+
 // Shared status heartbeat: frames / current wait / layer count
 // ("what step is the game parked on").
 static void print_status(AppState* state) {
     std::printf("[app] status frames=%llu wait=%s layers=%zu\n",
         (unsigned long long)state->frames, wait_desc(state->rt->current_wait()).c_str(),
         state->rt->scene().size());
+    std::fflush(stdout);
 };
+
+// Last-step breadcrumb next to the exe. Heap smash (0xC0000374) will not
+// unwind C++ catch; this file is unbuffered so the last Lua/tick/draw
+// phase survives the process dying.
+static std::string g_last_fn;
+static std::string g_last_tag;
+
+static FILE* crash_trace_file() {
+    static FILE* f = nullptr;
+    static bool inited = false;
+    if (inited) return f;
+    inited = true;
+#ifdef _WIN32
+    char mod[MAX_PATH] = {};
+    if (GetModuleFileNameA(nullptr, mod, MAX_PATH)) {
+        const auto p = std::filesystem::path(mod).parent_path() / "oa_last.log";
+        f = std::fopen(p.string().c_str(), "w");
+        if (f)
+            std::printf("[app] crash trace: %s\n", p.string().c_str());
+    }
+#endif
+    if (!f) f = std::fopen("oa_last.log", "w");
+    if (f) setvbuf(f, nullptr, _IONBF, 0);
+    return f;
+}
+
+static void crash_note(AppState* state, const char* phase) {
+    FILE* f = crash_trace_file();
+    if (!f) return;
+    std::string wait = "?";
+    size_t layers = 0;
+    if (state && state->rt) {
+        wait = wait_desc(state->rt->current_wait());
+        layers = state->rt->scene().size();
+    }
+    std::fprintf(f, "f=%llu %s wait=%s fn=%s tag=%s layers=%zu\n",
+                 (unsigned long long)(state ? state->frames : 0), phase,
+                 wait.c_str(), g_last_fn.c_str(), g_last_tag.c_str(), layers);
+}
+
+#ifdef _WIN32
+static LONG CALLBACK oa_vectored_crash(PEXCEPTION_POINTERS info) {
+    const DWORD code = info && info->ExceptionRecord
+                           ? info->ExceptionRecord->ExceptionCode
+                           : 0;
+    std::fprintf(stderr, "[app] win exception 0x%08lX at %p phase_fn=%s tag=%s\n",
+                 static_cast<unsigned long>(code),
+                 info && info->ExceptionRecord
+                     ? info->ExceptionRecord->ExceptionAddress
+                     : nullptr,
+                 g_last_fn.c_str(), g_last_tag.c_str());
+    std::fflush(stderr);
+    if (FILE* f = crash_trace_file()) {
+        std::fprintf(f, "EXCEPTION 0x%08lX at %p fn=%s tag=%s\n",
+                     static_cast<unsigned long>(code),
+                     info && info->ExceptionRecord
+                         ? info->ExceptionRecord->ExceptionAddress
+                         : nullptr,
+                     g_last_fn.c_str(), g_last_tag.c_str());
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
+// OA_AUTO_START=1: drive language (bt_cn / bt_cn_next) then 开始游戏
+// (bt_start) so a production exe can reproduce the start-game crash
+// without OA_TEST_BUILD autodrive.
+static void auto_start_pre_tick(AppState* state) {
+    if (!std::getenv("OA_AUTO_START") || !state->rt || !state->oaRender) return;
+    static int nav = 0;
+    static const char* keys[] = {"bt_cn", "bt_cn_next", "bt_start"};
+    static int hover_n = 0;
+    static int cooldown = 0;
+    static bool done = false;
+    static bool release_click = false;
+    // A held left_down would keep firing HUD buttons (config/quit) after
+    // 开始游戏 replaces the title — tmny31 then confirmed bt_end.
+    if (release_click) {
+        state->input.left_down = false;
+        release_click = false;
+    }
+    if (done) return;
+    if (cooldown > 0) {
+        --cooldown;
+        return;
+    }
+    if (nav >= 3) {
+        done = true;
+        return;
+    }
+    const char* want = keys[nav];
+    const oa::render::Layer* hit = nullptr;
+    for (const oa::render::Layer* l : state->rt->scene().draw_order()) {
+        const auto* h = state->rt->scene().find_event_handler(l->id, "click");
+        if (!h) continue;
+        const auto k = h->params.find("key");
+        if (k != h->params.end() && k->second == want) {
+            hit = l;
+            break;
+        }
+    }
+    if (!hit) {
+        // Language keys are gone once title_init has run; skip them.
+        if (std::strcmp(want, "bt_start") != 0 && state->saw_title_init) {
+            std::printf("[app] AUTO_START skip %s (title already up)\n", want);
+            ++nav;
+            hover_n = 0;
+        }
+        return;
+    }
+    const auto r = state->oaRender->layer_world_rect(*hit);
+    if (!r) return;
+    const double x0 = (*r)[0];
+    const double y0 = (*r)[1];
+    const double rw = (*r)[2];
+    const double rh = (*r)[3];
+    if (x0 < 0) {
+        hover_n = 0;
+        return;
+    }
+    const int cx = int(x0 + rw / 2);
+    const int cy = int(y0 + rh / 2);
+    state->input.mouse_x = cx;
+    state->input.mouse_y = cy;
+    ++hover_n;
+    if (hover_n == 1) {
+        std::printf("[app] AUTO_START hover %s (%d,%d) f=%llu\n", want, cx, cy,
+                    (unsigned long long)state->frames);
+        std::fflush(stdout);
+    }
+    if (hover_n >= 90) {
+        state->input.left_down = true;
+        state->input.left_click_edge = true;
+        release_click = true;
+        std::printf("[app] AUTO_START click %s (%d,%d) f=%llu\n", want, cx, cy,
+                    (unsigned long long)state->frames);
+        std::fflush(stdout);
+        crash_note(state, "auto-click");
+        hover_n = 0;
+        cooldown = 45;
+        ++nav;
+        if (std::strcmp(want, "bt_start") == 0) done = true;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // app-host video: host texture key for the fullscreen surface + per-frame
@@ -534,6 +728,21 @@ static std::string host_save_root(const std::string& pfs_path, bool is_dir) {
     return save_root;
 }
 
+static SDL_AppResult app_fail(const char* fmt, ...)
+{
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    SDL_SetError("%s", buf);
+    std::fprintf(stderr, "%s\n", buf);
+#ifdef __OHOS__
+    OH_LOG_Print(LOG_APP, LOG_ERROR, 0xFF00, "openartemis", "%{public}s", buf);
+#endif
+    return SDL_APP_FAILURE;
+}
+
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 {
     // the SDL3 main-callback driver runs event-gated when the
@@ -545,9 +754,14 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     // then stops; each click advances one frame". The engine is real-time
     // by design (ticks carry all clocks), so iteration must never be
     // event-gated: force the rate to "0" (as-fast-as-the-app-paces; the
-    // iterate tail's own SDL_Delay applies) with OVERRIDE priority, which
+    // iterate tail's 60 Hz vsync/cap applies) with OVERRIDE priority, which
     // beats the environment variable (SDL hints: env < override).
     SDL_SetHintWithPriority(SDL_HINT_MAIN_CALLBACK_RATE, "0", SDL_HINT_OVERRIDE);
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+#ifdef _WIN32
+    AddVectoredExceptionHandler(1, oa_vectored_crash);
+#endif
 
     // 创建app
     AppState* state = new AppState();
@@ -564,10 +778,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
             state->opt.pfs = e;
     }
     if (state->opt.pfs.empty()) {
-        std::fprintf(stderr,
-            "openartemis: no project given (positional argument or OA_PFS)\n");
         print_usage(argv[0]);
-        return SDL_APP_FAILURE;
+        return app_fail("openartemis: no project given (positional argument or OA_PFS)");
     }
     const std::string pfs_path = state->opt.pfs;
     // Platform services (oa::plat): wasm mounts its IDBFS save
@@ -608,8 +820,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         }
     }
     catch (const std::exception& e) {
-        std::fprintf(stderr, "cannot open project source: %s\n", e.what());
-        return SDL_APP_FAILURE;
+        return app_fail("cannot open project source: %s", e.what());
     }
     state->rt = std::move(std::make_unique<oa::runtime::GameRuntime>(fs));
     // Media decode pool (audio/video worker host; see DecodePool): thread
@@ -635,14 +846,19 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         state->rt->open_project(state->opt.platform);
     }
     catch (const std::exception& e) {
-        std::fprintf(stderr, "project open failed: %s\n", e.what());
-        return SDL_APP_FAILURE;
+        return app_fail("project open failed: %s", e.what());
     }
     state->rt->interpreter().on_step = [=](const std::string&, size_t, const oa::runtime::Instruction& i) {
         const std::string* f = i.get("function");
         if (f && *f == "title_init" && !state->saw_title_init) {
             state->saw_title_init = true;
             std::printf("[app] title_init executed\n");
+            std::fflush(stdout);
+        }
+        if (f && !f->empty()) {
+            g_last_fn = *f;
+        } else if (i.kind == oa::runtime::Instruction::Kind::Tag && !i.tag.empty()) {
+            g_last_tag = i.tag;
         }
         };
 
@@ -656,8 +872,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         state->rt->boot_project();
     }
     catch (const std::exception& e) {
-        std::fprintf(stderr, "project boot failed: %s\n", e.what());
-        return SDL_APP_FAILURE;
+        return app_fail("project boot failed: %s", e.what());
     }
     std::printf("[app] project booted; %s\n",
         state->opt.headless ? "headless: driving GameRuntime with virtual 16ms ticks"
@@ -723,6 +938,23 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
             });
     }
 #endif // OA_TEST_BUILD
+
+#if !OA_TEST_BUILD
+    {
+        using PD = oa::runtime::GameRuntime::PointerDispatch;
+        state->rt->set_pointer_observer([=](const PD& d) {
+            if (d.kind != PD::Kind::Click) return;
+            static int n = 0;
+            if (n++ < 40) {
+                std::printf("[app] click layer %s key=%s\n", d.layer.c_str(),
+                            d.key.c_str());
+                std::fflush(stdout);
+            }
+            g_last_tag = std::string("click:") + d.key;
+            crash_note(state, "click");
+        });
+    }
+#endif
 
     // The runtime owns pointer dispatch — it needs the texture sizes and
     // the alpha sampler above, plus the mouse/keys per tick (FrameInput).
@@ -801,10 +1033,29 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 
     // ---- windowed host: create the window + renderer now (SDL video only
     // touched here, so --headless never needs a display) --------------------
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-        return SDL_APP_FAILURE;
+#if defined(__OHOS__)
+    // VintagePomelo's SDL_OHOS host already called SDL_Init. Re-running
+    // VIDEO|AUDIO|EVENTS here can fail the whole boot on AUDIO, and SDL
+    // may unwind VIDEO while the XComponent is live. Match KR2: only
+    // create the window / GLES context.
+    if (!SDL_WasInit(SDL_INIT_VIDEO)) {
+        if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+            return app_fail("SDL_Init(VIDEO) failed: %s", SDL_GetError());
+        }
     }
+    if (!SDL_WasInit(SDL_INIT_AUDIO)) {
+        if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            std::fprintf(stderr, "[app] SDL_InitSubSystem(AUDIO) failed: %s\n",
+                         SDL_GetError());
+            OH_LOG_Print(LOG_APP, LOG_WARN, 0xFF00, "openartemis",
+                         "SDL_InitSubSystem(AUDIO) failed: %{public}s", SDL_GetError());
+        }
+    }
+#else
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS)) {
+        return app_fail("SDL_Init failed: %s", SDL_GetError());
+    }
+#endif
     // resizable window + letterbox presentation. Content
     // always renders into the fixed stage offscreen target; the letterbox
     // logical presentation (SDL_LOGICAL_PRESENTATION_LETTERBOX) scales that
@@ -889,11 +1140,82 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     if (const char* v = std::getenv("OA_WIN_H"); v && *v && std::atoi(v) > 0)
         stage_h = std::atoi(v);
 #endif
+#if defined(__OHOS__)
+    // Match KR2 (krkrsdl_harmony.cpp): disable SDL's touch↔mouse synthesis
+    // (we map fingers ourselves) and do not pop the IME on window create.
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+    SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+#ifdef SDL_HINT_ENABLE_SCREEN_KEYBOARD
+    SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
+#endif
+    // Match KR2 (krkrsdl_harmony.cpp) and RPGRunner (sdl_misc.c): GLES
+    // attributes first, then a 0×0 FULLSCREEN_DESKTOP window so the host
+    // XComponent owns the surface. Scaling the 1920×1080 stage into that
+    // surface is the engine's job (KR2 SDL_GL_DrawTexture / RPGRunner
+    // recalculate_viewport), not an SDL2 fork.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    win_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP;
+    state->window = oa_sdl2_CreateWindow()(
+        "openartemis",
+        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        0, 0, win_flags);
+#else
     state->window = SDL_CreateWindow("openartemis", stage_w, stage_h, win_flags);
+#endif
     if (!state->window) {
-        std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
-        return SDL_APP_FAILURE;
+        return app_fail("SDL_CreateWindow failed: %s", SDL_GetError());
     }
+#if defined(__OHOS__)
+    // KR2 (krkrsdl_harmony.cpp): CreateContext immediately after the 0x0
+    // FULLSCREEN_DESKTOP window, then MakeCurrent (return value ignored).
+    {
+        int ww = 0, wh = 0;
+        SDL_GetWindowSize(state->window, &ww, &wh);
+        SDL_Log("[oa-kr2gl] window %dx%d, creating GLES context", ww, wh);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xFF00, "openartemis",
+                     "[oa-kr2gl] window %{public}dx%{public}d", ww, wh);
+        SDL_GLContext glctx = SDL_GL_CreateContext(state->window);
+        if (!glctx) {
+            SDL_ClearError();
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+            glctx = SDL_GL_CreateContext(state->window);
+        }
+        if (!glctx) {
+            return app_fail("[oa-kr2gl] SDL_GL_CreateContext failed: %s", SDL_GetError());
+        }
+        // CreateContext already called eglMakeCurrent. A second
+        // OHOS_GLES_MakeCurrent can recreate the XComponent surface and
+        // unbind the working context (shader compile then sees no GL).
+        if (SDL_GL_GetCurrentContext() != glctx)
+            (void)oa_sdl2_GL_MakeCurrent()(state->window, glctx);
+        // KR2: interval 1 immediately after CreateContext. Panel Hz is the
+        // tick rate; this is not a 60 fps lock.
+        SDL_GL_SetSwapInterval(1);
+        SDL_StopTextInput();
+        SDL_ShowWindow(state->window);
+        {
+            int dw = 0, dh = 0, ww = 0, wh = 0;
+            SDL_GetWindowSize(state->window, &ww, &wh);
+            SDL_GL_GetDrawableSize(state->window, &dw, &dh);
+            SDL_Log("[oa-kr2gl] GLES context ready (current=%p swap=%d win=%dx%d drawable=%dx%d)",
+                    (void*)SDL_GL_GetCurrentContext(), SDL_GL_GetSwapInterval(),
+                    ww, wh, dw, dh);
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0xFF00, "openartemis",
+                         "[oa-kr2gl] GLES ready win=%{public}dx%{public}d drawable=%{public}dx%{public}d",
+                         ww, wh, dw, dh);
+        }
+    }
+#endif
     // Mobile: apply SDL's own immersive fullscreen now that the window exists.
     //
     // This is the ONLY thing that actually enters fullscreen on Android (see the
@@ -920,10 +1242,22 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 #endif
     if (!state->oaRender->create_renderer(state->window,
                                           state->opt.renderer)) {
-        std::fprintf(stderr, "[app] renderer creation failed (kind=%s): %s\n",
-                     state->opt.renderer.c_str(), SDL_GetError());
-        return SDL_APP_FAILURE;
+        const char* se = SDL_GetError();
+        return app_fail("[app] renderer creation failed (kind=%s): %s",
+                        state->opt.renderer.c_str(),
+                        (se && *se) ? se : "unknown");
     }
+#if defined(__OHOS__)
+    {
+        int dw = 0, dh = 0, ww = 0, wh = 0;
+        SDL_GetWindowSize(state->window, &ww, &wh);
+        SDL_GL_GetDrawableSize(state->window, &dw, &dh);
+        if (dw > 1 && dh > 1)
+            state->oaRender->note_window_size(dw, dh);
+        else if (ww > 1 && wh > 1)
+            state->oaRender->note_window_size(ww, wh);
+    }
+#endif
     // Presentation diagnostics: the letterbox scale is what decides whether the
     // stage fills the screen or lands tiny in a corner, and it is derived from
     // the window's size vs its pixel size. A logical size far below the pixel
@@ -934,8 +1268,19 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         SDL_GetWindowSize(state->window, &ww, &wh);
         int pw = 0, ph = 0;
         SDL_GetWindowSizeInPixels(state->window, &pw, &ph);
-        std::printf("[app] geometry window=%dx%d pixels=%dx%d stage=%dx%d\n",
-                    ww, wh, pw, ph, stage_w, stage_h);
+        int dw = 0, dh = 0;
+        (void)state->oaRender->present_size(&dw, &dh);
+        std::printf("[app] geometry window=%dx%d pixels=%dx%d present=%dx%d stage=%dx%d\n",
+                    ww, wh, pw, ph, dw, dh, stage_w, stage_h);
+#if defined(__OHOS__)
+        std::printf("[app] frame pace = display vsync (SwapInterval 1; not a 60 Hz lock)\n");
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xFF00, "openartemis",
+                     "[app] geometry win=%{public}dx%{public}d present=%{public}dx%{public}d stage=%{public}dx%{public}d",
+                     ww, wh, dw, dh, stage_w, stage_h);
+#else
+        std::printf("[app] frame pace %d Hz (vsync + remainder cap; skip present when static)\n",
+                    frame_pace_hz(state->opt));
+#endif
         std::fflush(stdout);
     }
 
@@ -962,7 +1307,10 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 #endif
     });
 
+    std::printf("[app] opening audio device...\n");
+    std::fflush(stdout);
     state->rt->media_players().init();
+    std::fflush(stdout);
     // movie (container) audio rides the SAME SDL stream the
     // sound players mix into. VideoEngine pushes its decoded 44100 stereo
     // through MediaPlayers (SDL_AudioStream serializes internally, so the
@@ -999,27 +1347,27 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 // ---------------------------------------------------------------------------
 // Touch -> mouse bridging.
 // ---------------------------------------------------------------------------
-// SDL only synthesizes mouse events from touch when SDL_TOUCH_MOUSE_EVENTS is
-// enabled (off by default), so a touch-only shell would otherwise deliver
-// NOTHING the engine can use — every tap has to become a pointer event here.
-// The gesture model follows the krkrsdl3 reference implementation
-// (cpp/environ/sdl3/sdl3_app.cpp):
+// SDL's touch→mouse synthesis is off (SDL_HINT_TOUCH_MOUSE_EVENTS=0, same as
+// KR2). Finger events must become pointer events here or the screen is dead
+// while injected sdlInputMouse (virtual cursor) still works.
 //
-//   one finger    -> left button (tap) + pointer motion (drag)
-//   two fingers   -> right button (tap) — Artemis wires right-click to EXIT /
-//                    the UI back chain, so this is the "cancel" gesture
-//   three fingers -> (that build opens its own native menu; this engine has no
-//                    such menu, so it is deliberately NOT mapped)
-//
-// Synthesized events are pushed through SDL's own queue, so a touch tap rides
-// exactly the path a real pointer does — including the window -> stage
-// coordinate mapping and the left/right vk edges handled in SDL_AppEvent.
+// Harmony KR2 (krkrsdl_harmony.cpp): press left on first finger-down, release
+// on last finger-up. A 12 px "tap vs drag" gate on high-DPI panels swallows
+// ordinary taps. Two fingers cancel the left button and tap-right on lift.
+#ifdef OA_USE_SDL2
+#define OA_FINGER_ID(ev) ((ev)->tfinger.fingerId)
+#define OA_EVENT_KEY(ev) ((ev)->key.keysym.sym)
+#else
+#define OA_FINGER_ID(ev) ((ev)->tfinger.fingerID)
+#define OA_EVENT_KEY(ev) ((ev)->key.key)
+#endif
+
 enum class TouchPhase { Idle, SingleFinger, MultiFinger };
 
 struct TouchFinger {
     float x = 0.0f;  // latest window coordinates
     float y = 0.0f;
-    float start_x = 0.0f;  // where it went down (drives the tap/drag decision)
+    float start_x = 0.0f;
     float start_y = 0.0f;
     bool moved = false;
 };
@@ -1027,24 +1375,20 @@ struct TouchFinger {
 struct TouchGestureState {
     TouchPhase phase = TouchPhase::Idle;
     std::map<SDL_FingerID, TouchFinger> fingers;
-    // Deferred button release. SDL_AppEvent runs every queued event BEFORE the
-    // frame's SDL_AppIterate, so a press and its release pushed from one tap
-    // would both be consumed by the same tick: the engine would see the click
-    // edge and the button-up edge in a single frame, never a frame with the
-    // button actually held. Holding it for one frame makes a tap look like the
-    // mouse press a desktop user produces.
-    Uint8 pending_button = 0;  // 0 = nothing pending
+    bool single_left_down = false;
+    // Two-finger right tap: defer the button-up one frame so the engine sees
+    // the press held across a tick (same as the old one-finger tap path).
+    Uint8 pending_button = 0;
     float pending_x = 0.0f;
     float pending_y = 0.0f;
 };
-// Internal linkage: this TU is compiled twice (main_test.cpp includes it), so
-// the gesture state must not become an external symbol.
 namespace {
 TouchGestureState g_touch;
 }  // namespace
 
-// Movement beyond this (in window pixels) separates a tap from a drag.
-constexpr float kTouchMoveThreshold = 12.0f;
+// Normalized 0..1 threshold, same magnitude as KR2 HTS_MOVE_THRESHOLD_SQ
+// (0.0001 → 1% of the surface). Used only for two-finger tap vs scroll.
+constexpr float kTouchMoveThresholdSq = 0.0001f;
 
 /// Pushes a mouse button event into the SDL queue in window coordinates.
 void touch_push_mouse(Uint32 type, Uint8 button, float wx, float wy) {
@@ -1052,8 +1396,13 @@ void touch_push_mouse(Uint32 type, Uint8 button, float wx, float wy) {
     e.type = type;
     e.button.button = button;
     e.button.clicks = 1;
+#ifdef OA_USE_SDL2
+    e.button.x = (Sint32)wx;
+    e.button.y = (Sint32)wy;
+#else
     e.button.x = wx;
     e.button.y = wy;
+#endif
     e.button.which = SDL_TOUCH_MOUSEID;
     SDL_PushEvent(&e);
 }
@@ -1061,8 +1410,13 @@ void touch_push_mouse(Uint32 type, Uint8 button, float wx, float wy) {
 void touch_push_motion(float wx, float wy) {
     SDL_Event e{};
     e.type = SDL_EVENT_MOUSE_MOTION;
+#ifdef OA_USE_SDL2
+    e.motion.x = (Sint32)wx;
+    e.motion.y = (Sint32)wy;
+#else
     e.motion.x = wx;
     e.motion.y = wy;
+#endif
     e.motion.which = SDL_TOUCH_MOUSEID;
     SDL_PushEvent(&e);
 }
@@ -1101,72 +1455,89 @@ void touch_advance_frame() {
 }
 
 void touch_handle(AppState* state, const SDL_Event* ev) {
-    // SDL reports touch positions normalized to the window (0..1).
+    // KR2 hts_toPixel: SDL finger coords are 0..1, multiply by the
+    // drawable/surface (letterbox output), not the possibly-stale window
+    // size from CreateWindow(0,0) / stage.
     int win_w = 0, win_h = 0;
-    SDL_GetWindowSize(state->window, &win_w, &win_h);
-    if (win_w <= 0 || win_h <= 0) return;
-    const float wx = ev->tfinger.x * float(win_w);
-    const float wy = ev->tfinger.y * float(win_h);
+    if (!state->oaRender || !state->oaRender->present_size(&win_w, &win_h) ||
+        win_w <= 1 || win_h <= 1) {
+        SDL_GetWindowSize(state->window, &win_w, &win_h);
+#ifdef OA_USE_SDL2
+        int dw = 0, dh = 0;
+        SDL_GL_GetDrawableSize(state->window, &dw, &dh);
+        if (dw > 1 && dh > 1) {
+            win_w = dw;
+            win_h = dh;
+        }
+#endif
+    }
+    if (win_w <= 1 || win_h <= 1) return;
+    const float nx = ev->tfinger.x;
+    const float ny = ev->tfinger.y;
+    const float wx = nx * float(win_w);
+    const float wy = ny * float(win_h);
 
     if (ev->type == SDL_EVENT_FINGER_DOWN) {
         TouchFinger f;
         f.x = f.start_x = wx;
         f.y = f.start_y = wy;
-        g_touch.fingers[ev->tfinger.fingerID] = f;
-        // Nothing is emitted here. A finger landing is not yet a gesture — a
-        // second finger may follow and turn it into a right click. Emitting a
-        // motion (or worse, a press) at this point is exactly what made the
-        // two-finger gesture collide with an ordinary click: the engine saw the
-        // pointer move to the button and dispatched a left click before the
-        // gesture was even resolved. The krkrsdl3 reference emits nothing on
-        // finger-down either; everything is decided at finger-up.
+        g_touch.fingers[OA_FINGER_ID(ev)] = f;
         if (g_touch.fingers.size() == 1) {
+            // KR2: left button down on first contact so a VN tap advances
+            // even if the finger jitters, and hover/hit-test see the press.
             g_touch.phase = TouchPhase::SingleFinger;
+            g_touch.single_left_down = true;
+            touch_push_motion(wx, wy);
+            touch_push_mouse(SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_BUTTON_LEFT, wx, wy);
         } else if (g_touch.fingers.size() == 2) {
+            if (g_touch.single_left_down) {
+                const TouchFinger& first = g_touch.fingers.begin()->second;
+                touch_push_mouse(SDL_EVENT_MOUSE_BUTTON_UP, SDL_BUTTON_LEFT,
+                                 first.x, first.y);
+                g_touch.single_left_down = false;
+            }
             g_touch.phase = TouchPhase::MultiFinger;
         } else {
-            // Three or more fingers: not a gesture this engine maps (the
-            // reference build opens its own native menu here, which does not
-            // exist for us). Drop the gesture so lifting those fingers emits
-            // nothing at all.
+            if (g_touch.single_left_down) {
+                touch_push_mouse(SDL_EVENT_MOUSE_BUTTON_UP, SDL_BUTTON_LEFT, wx, wy);
+                g_touch.single_left_down = false;
+            }
             g_touch.phase = TouchPhase::Idle;
         }
         return;
     }
 
     if (ev->type == SDL_EVENT_FINGER_MOTION) {
-        auto it = g_touch.fingers.find(ev->tfinger.fingerID);
+        auto it = g_touch.fingers.find(OA_FINGER_ID(ev));
         if (it == g_touch.fingers.end()) return;
         TouchFinger& f = it->second;
         f.x = wx;
         f.y = wy;
-        const float dx = wx - f.start_x;
-        const float dy = wy - f.start_y;
-        if (dx * dx + dy * dy > kTouchMoveThreshold * kTouchMoveThreshold) f.moved = true;
-        // Only a lone finger drags the pointer: a second finger means the user
-        // is performing the right-click gesture, not aiming the cursor.
+        const float dx = nx - (f.start_x / float(win_w));
+        const float dy = ny - (f.start_y / float(win_h));
+        if (dx * dx + dy * dy > kTouchMoveThresholdSq) f.moved = true;
         if (g_touch.phase == TouchPhase::SingleFinger) touch_push_motion(f.x, f.y);
         return;
     }
 
     if (ev->type == SDL_EVENT_FINGER_UP) {
-        auto it = g_touch.fingers.find(ev->tfinger.fingerID);
+        auto it = g_touch.fingers.find(OA_FINGER_ID(ev));
         if (it == g_touch.fingers.end()) return;
         TouchFinger f = it->second;
+        f.x = wx;
+        f.y = wy;
         const int remaining = int(g_touch.fingers.size()) - 1;
         g_touch.fingers.erase(it);
-        // The gesture resolves when the LAST finger lifts (reference order:
-        // test the count first, erase after).
         if (remaining > 0) return;
 
-        if (g_touch.phase == TouchPhase::MultiFinger) {
-            // Two fingers -> right click. A finger that dragged is not a tap.
+        if (g_touch.phase == TouchPhase::SingleFinger && g_touch.single_left_down) {
+            touch_push_mouse(SDL_EVENT_MOUSE_BUTTON_UP, SDL_BUTTON_LEFT, f.x, f.y);
+            g_touch.single_left_down = false;
+        } else if (g_touch.phase == TouchPhase::MultiFinger) {
             if (!f.moved) touch_tap(state, SDL_BUTTON_RIGHT, f.x, f.y);
-        } else if (g_touch.phase == TouchPhase::SingleFinger) {
-            // One finger -> left click; a drag only moved the pointer.
-            if (!f.moved) touch_tap(state, SDL_BUTTON_LEFT, f.x, f.y);
         }
         g_touch.phase = TouchPhase::Idle;
+        g_touch.single_left_down = false;
         return;
     }
 }
@@ -1181,13 +1552,23 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* ev)
     // by pointer motion).
     if (ev->type == SDL_EVENT_QUIT)
         return SDL_APP_SUCCESS;
-    // Touch-only shells: translate finger gestures into the pointer events the
-    // engine consumes (see the touch-bridging section above).
-    if (ev->type == SDL_EVENT_FINGER_DOWN || ev->type == SDL_EVENT_FINGER_MOTION ||
+    if (ev->type == SDL_EVENT_FINGER_DOWN ||
+        ev->type == SDL_EVENT_FINGER_MOTION ||
         ev->type == SDL_EVENT_FINGER_UP) {
         touch_handle(state, ev);
         return SDL_APP_CONTINUE;
     }
+#ifdef OA_USE_SDL2
+    if (ev->type == SDL_WINDOWEVENT) {
+        if (ev->window.event == SDL_WINDOWEVENT_RESIZED ||
+            ev->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+            ev->window.event == SDL_WINDOWEVENT_EXPOSED) {
+            if (ev->window.data1 > 1 && ev->window.data2 > 1)
+                state->oaRender->note_window_size(ev->window.data1, ev->window.data2);
+            state->force_repaint = true;
+        }
+    }
+#else
     if (ev->type == SDL_EVENT_WINDOW_RESIZED ||
         ev->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
         ev->type == SDL_EVENT_WINDOW_EXPOSED) {
@@ -1197,15 +1578,16 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* ev)
         // re-fits the stage frame to the new window size on that present).
         state->force_repaint = true;
     }
+#endif
     if (ev->type == SDL_EVENT_KEY_DOWN) {
-        if (ev->key.key == SDLK_ESCAPE)
+        if (OA_EVENT_KEY(ev) == SDLK_ESCAPE)
             return SDL_APP_SUCCESS;
-        const int vk = sdl_key_to_vk(ev->key.key);
+        const int vk = sdl_key_to_vk(OA_EVENT_KEY(ev));
         if (vk > 0 && state->kbd_down.insert(vk).second)
             state->input.key_down_edges.push_back(vk);
     }
     if (ev->type == SDL_EVENT_KEY_UP) {
-        const int vk = sdl_key_to_vk(ev->key.key);
+        const int vk = sdl_key_to_vk(OA_EVENT_KEY(ev));
         if (vk > 0 && state->kbd_down.erase(vk) > 0)
             state->input.key_up_edges.push_back(vk);
     }
@@ -1235,19 +1617,32 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* ev)
             state->wheel_hold_frames[137] = 2;
         }
     }
-    if (ev->type == SDL_EVENT_MOUSE_MOTION) {
-        // Window coordinates -> engine (logical stage) coordinates.
-        // Identity on a 1:1 display; corrects HiDPI / compositor
-        // scale so a real pointer hits the same engine point the
-        // synthetic probe writes.
-        float rx = float(ev->motion.x), ry = float(ev->motion.y);
-        if (state->oaRender->get_renderer_coordinates(rx, ry, &rx, &ry)) {
-            state->input.mouse_x = (int)rx;
-            state->input.mouse_y = (int)ry;
+    if (ev->type == SDL_EVENT_MOUSE_MOTION ||
+        ev->type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+        ev->type == SDL_EVENT_MOUSE_BUTTON_UP) {
+        // Window/surface pixels → engine stage, including letterbox (KR2
+        // hts_windowToDrawablePixel + hts_pixelToLocal).
+        float rx = 0, ry = 0;
+        bool have = false;
+        if (ev->type == SDL_EVENT_MOUSE_MOTION) {
+            rx = float(ev->motion.x);
+            ry = float(ev->motion.y);
+            have = true;
+        } else if (ev->button.x != 0 || ev->button.y != 0) {
+            // sdlInputMouse's SendMouseButton path has no x/y (0,0); keep
+            // the last motion. PushEvent / touch synthesis include coords.
+            rx = float(ev->button.x);
+            ry = float(ev->button.y);
+            have = true;
         }
-        else {
-            state->input.mouse_x = (int)ev->motion.x;
-            state->input.mouse_y = (int)ev->motion.y;
+        if (have) {
+            if (state->oaRender->get_renderer_coordinates(rx, ry, &rx, &ry)) {
+                state->input.mouse_x = (int)rx;
+                state->input.mouse_y = (int)ry;
+            } else if (ev->type == SDL_EVENT_MOUSE_MOTION) {
+                state->input.mouse_x = (int)ev->motion.x;
+                state->input.mouse_y = (int)ev->motion.y;
+            }
         }
     }
     if (ev->type == SDL_EVENT_MOUSE_BUTTON_DOWN || ev->type == SDL_EVENT_MOUSE_BUTTON_UP) {
@@ -1300,6 +1695,27 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     }
 
     const Uint64 frame_start = SDL_GetTicks();
+#if defined(__OHOS__)
+    // Surface size often lands after the first CreateWindow (0x0 / stage).
+    // Static-frame skip would freeze that postage-stamp present. Also
+    // re-layout when ArkTS pushes TAPIR_PORTRAIT_TOP_OFFSET.
+    if (state->window) {
+        int dw = 0, dh = 0;
+        SDL_GL_GetDrawableSize(state->window, &dw, &dh);
+        static int s_prev_dw = -1, s_prev_dh = -1, s_prev_pct = -999;
+        int pct = 0;
+        if (const char* env = std::getenv("TAPIR_PORTRAIT_TOP_OFFSET"); env && *env)
+            pct = std::atoi(env);
+        if (dw != s_prev_dw || dh != s_prev_dh || pct != s_prev_pct) {
+            s_prev_dw = dw;
+            s_prev_dh = dh;
+            s_prev_pct = pct;
+            if (dw > 1 && dh > 1)
+                state->oaRender->note_window_size(dw, dh);
+            state->force_repaint = true;
+        }
+    }
+#endif
 #if OA_TEST_BUILD
     // auto-drive: apply the actions the state machine armed (keys/click)
     // before the per-frame edge computation consumes them.
@@ -1319,6 +1735,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 #endif
     state->input.left_click_edge = state->input.left_down && !state->mouse_left_prev;
     state->mouse_left_prev = state->input.left_down;
+    auto_start_pre_tick(state);
 #if OA_TEST_BUILD
     // rollover/rollout + click + drag dispatch now happen inside
     // rt->tick (runtime-owned). The smoke
@@ -1480,7 +1897,17 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     const uint64_t delta = now - state->last;
     state->last = now;
     try {
+        if (state->frames == 0) {
+            std::printf("[app] first tick...\n");
+            std::fflush(stdout);
+        }
+        crash_note(state, "tick-enter");
         state->rt->tick(delta > 0 ? delta : 1, state->input);
+        crash_note(state, "tick-ok");
+        if (state->frames == 0) {
+            std::printf("[app] first tick done\n");
+            std::fflush(stdout);
+        }
     }
     catch (const std::exception& e) {
         std::fprintf(stderr, "[app] tick error: %s\n", e.what());
@@ -1493,7 +1920,9 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     state->input.key_up_edges.clear();
     if (state->rt->exit_requested()) state->quit = true;
     const std::vector<oa::runtime::Event> drained_events = state->rt->drain_events();
+    crash_note(state, "events");
     for (const auto& e : drained_events) state->oaRender->process_event(e);
+    crash_note(state, "pump");
     // upload newly decoded video frames (before the draw pass so bound
     // layer textures resolve; forces redraws while a channel is active).
     // static emote textures before the draw pass. A fresh emote pose revision
@@ -1678,6 +2107,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     const bool repaint_requested = state->force_repaint;
     state->force_repaint = false;
     if (frame_dirty || !s_rendered_any || repaint_requested) {
+        crash_note(state, "draw");
 
         state->oaRender->render_beigin();
         // L2 M1: ONE recursive scene traversal — dotted-id tree
@@ -1727,6 +2157,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
         // deferred [takess] capture — snapshot this frame's
         // content (pre-present) when a takess request is pending.
         state->rt->post_frame_capture();
+        crash_note(state, "present");
         state->oaRender->render_end();
 #if OA_TEST_BUILD
         // auto-drive: sample the just-presented pixels (tail stage) and
@@ -1741,8 +2172,19 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 #endif
         s_rendered_any = true;
     }
+#if defined(__OHOS__)
+    else if (s_rendered_any) {
+        // KR2 SwapWindow every loop iteration so vsync blocks even on a
+        // static scene. Re-blit the last stage so the back buffer is defined.
+        crash_note(state, "present");
+        state->oaRender->render_end();
+    }
+#endif
     ++state->frames;
-    if (state->frames == 1) std::printf("[app] first-frame layers=%zu\n", state->rt->scene().size());
+    if (state->frames == 1) {
+        std::printf("[app] first-frame layers=%zu\n", state->rt->scene().size());
+        std::fflush(stdout);
+    }
 #if OA_TEST_BUILD
     // auto-drive state machine (runs every frame; pixel metrics only
     // count on frames that actually rendered).
@@ -2006,16 +2448,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // reports the failure).
     video_demo_end(state, &state->quit);
 #endif
-    if (state->opt.fps > 0) {
-        // --fps N: pace each frame to ~1000/N ms of wall time (keeps the
-        // real-time delta semantics, just with a target frame interval).
-        const Uint64 spent = SDL_GetTicks() - frame_start;
-        const Uint64 want = 1000u / (unsigned)state->opt.fps;
-        if (want > 0 && spent < want) SDL_Delay((Uint32)(want - spent));
-    }
-    else {
-        SDL_Delay(8); // legacy default pacing (~60 fps ballpark)
-    }
+    pace_windowed_frame(frame_pace_hz(state->opt), frame_start);
 #if OA_TEST_BUILD
     // OA_DIRTY_AB: 旅程/运行结束汇总(退出帧的 A/B 已在上面跑完)
     if (state->quit && !s_ab_summarized && std::getenv("OA_DIRTY_AB")) {
@@ -2065,8 +2498,39 @@ void SDL_AppQuit(void* appstate, SDL_AppResult result)
         delete state;
     }
     oa::plat::shutdown(); // final platform teardown (wasm: last IDBFS persist attempt)
+#ifndef OA_HARMONY_LIB
+    // Host VintagePomelo owns the process-wide SDL instance. Calling
+    // SDL_Quit here would tear down the XComponent window while the app
+    // is still alive.
     SDL_Quit();
+#endif
 }
+
+#ifdef OA_USE_SDL2
+#ifndef OA_HARMONY_LIB
+int main(int argc, char* argv[]) {
+    SDL_SetMainReady();
+    void* appstate = nullptr;
+    SDL_AppResult r = SDL_AppInit(&appstate, argc, argv);
+    if (r != SDL_APP_CONTINUE) {
+        SDL_AppQuit(appstate, r);
+        return r == SDL_APP_SUCCESS ? 0 : 1;
+    }
+    while (true) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            r = SDL_AppEvent(appstate, &ev);
+            if (r != SDL_APP_CONTINUE) goto oa_done;
+        }
+        r = SDL_AppIterate(appstate);
+        if (r != SDL_APP_CONTINUE) break;
+    }
+oa_done:
+    SDL_AppQuit(appstate, r);
+    return r == SDL_APP_SUCCESS ? 0 : 1;
+}
+#endif
+#endif
 
 
 

@@ -84,13 +84,12 @@ void test_project_synthetic() {
     check(p.config.resizable && p.config.fixed_aspect_ratio && p.config.sidecut,
           "flag bools");
     check(p.config.env.at("FPS") == "60", "env keeps fps");
-    bool threw = false;
-    try {
-        oa::fs::Project::open(fs, "android");
-    } catch (const std::runtime_error&) {
-        threw = true;
-    }
-    check(threw, "missing platform section throws");
+    auto android = oa::fs::Project::open(fs, "android");
+    check(android.config.stage_width == 1920 && android.config.stage_height == 1080,
+          "android falls back to WINDOWS size");
+    check(android.config.platform == "android", "requested platform kept");
+    check(android.config.boot_script == "system/first.iet", "android fallback boot");
+    check(android.config.charset == "UTF-8", "android fallback charset");
 }
 
 void test_project_real_fpm() {

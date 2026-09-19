@@ -377,6 +377,11 @@ bool GameRuntime::RuntimeState::apply_media_event(const oa::runtime::Event& e) {
                 if (video_.video_frame(e.id, &w, &h, &rgba, &rev) && rgba &&
                     w > 0 && h > 0) {
                     const size_t n = size_t(w) * size_t(h);
+                    if (std::getenv("OA_VIDEO_DEBUG")) {
+                        std::fprintf(stderr,
+                                     "[video] story strip gate begin '%s' %dx%d\n",
+                                     e.id.c_str(), w, h);
+                    }
                     size_t content = 0;
                     for (size_t i = 0; i < n; ++i) {
                         const bool lit =

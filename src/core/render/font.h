@@ -134,6 +134,14 @@ public:
         oa::render::TextureRef tex = nullptr;
         int bitmap_left = 0;
         int bitmap_top = 0;
+        // 位图像素尺寸（缓存后绘制不再回问后端 texture_size）。
+        int w = 0;
+        int h = 0;
+        // 图集内像素位置（in_atlas=true 时作为 draw src 矩形左上角）。
+        float src_x = 0.0f;
+        float src_y = 0.0f;
+        // true = tex 指向共享图集页（析构不逐字形销毁，页统一释放）。
+        bool in_atlas = false;
     };
     CachedGlyph glyph_slot(oa::render::RenderBackend* backend, FT_Face face,
                            double size, uint32_t cp);
@@ -148,6 +156,29 @@ private:
     std::map<std::string, FaceEntry> font_faces; // 逻辑 face → 已加载字体
     std::map<std::string, CachedGlyph> glyph_cache; // key face\tppem\tcp
     std::map<std::string, CachedGlyph> edge_cache;  // key face\tppem\tcp\tw\tenc
+
+    // ------------------------------------------------------------------
+    // 字形图集（docs/PERFORMANCE_OPTIMIZATION_PLAN.md §1.2）：同页字形共享
+    // 一张纹理 → 后端按纹理键合批，文本页 draw call 从 O(字形数) 降到 O(1)。
+    // 1px 边缘复制 padding 使 GL_LINEAR 采样与独立纹理 CLAMP_TO_EDGE
+    // 逐像素等价（放大采样越界时取到的是自身边缘的副本）。
+    // 后端不支持子区域更新（update_texture_region false）→ 整体回退
+    // 逐字形独立纹理（行为与图集前完全一致）。
+    struct AtlasPage {
+        oa::render::TextureRef tex = nullptr;
+        int pen_x = 0;
+        int pen_y = 0;
+        int row_h = 0;
+    };
+    std::vector<AtlasPage> atlas_pages_;
+    bool atlas_failed_ = false; // 后端不支持/页数耗尽 → 永久回退
+    static constexpr int kAtlasSize = 1024;
+    static constexpr size_t kAtlasMaxPages = 8; // 8×4MB 上限
+    /// 把 w×h RGBA 位图插入图集，返回页纹理并输出字形内容区左上角
+    /// （含 1px padding 的内缩）。失败（不支持/耗尽）返回 nullptr。
+    oa::render::TextureRef atlas_insert(oa::render::RenderBackend* backend,
+                                        const std::vector<uint8_t>& rgba,
+                                        int w, int h, float* sx, float* sy);
 
     // 默认面（默认字体候选）
     const std::string kDefaultFace = std::string(oa::render::kDefaultFontFile);

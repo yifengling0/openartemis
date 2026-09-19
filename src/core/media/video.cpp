@@ -80,7 +80,11 @@ std::string mask_sibling_name(const std::string& file) {
 /// and the `_m` partner modulates that visibility. The main RGB is never
 /// touched: the mask only gates how much of the (luma-keyed) main picture
 /// shows, and it never contributes color.
-void bake_video_mask_alpha(uint8_t* rgba, int w, int h, const uint8_t* mask_rgba) {
+void bake_video_mask_alpha(uint8_t* rgba, size_t rgba_n, int w, int h,
+                           const uint8_t* mask_rgba, size_t mask_n) {
+    if (!rgba || !mask_rgba || w <= 0 || h <= 0) return;
+    const size_t need = size_t(w) * size_t(h) * 4;
+    if (rgba_n < need || mask_n < need) return;
     const size_t n = size_t(w) * size_t(h);
     for (size_t i = 0; i < n; ++i) {
         const size_t p = i * 4;
@@ -115,26 +119,31 @@ void VideoEngine::cancel_pipe(DecodeState& ds) {
     ds.pipe.reset();
 }
 
-/// Spawn one pool worker that decodes `file` from frame 1 onward into the
+/// Spawn one pool worker that decodes `bytes` from frame 1 onward into the
 /// double-buffered pipe (frame 0 is decoded synchronously at start_decode).
 /// The worker restarts loops exactly like the synchronous pump does, so the
 /// delivered frame sequence is deterministic and identical to decoding on
-/// the caller's thread.
-void VideoEngine::start_pipe(DecodeState& ds, const std::string& file, bool loop_play) {
-    if (!pool_ || pool_->threads() <= 0 || !loader_) return;
+/// the caller's thread. Bytes are passed in (not re-fetched through
+/// loader_/PhysicsFS) because PhysicsFS is not thread-safe.
+void VideoEngine::start_pipe(DecodeState& ds, bool loop_play,
+                             std::shared_ptr<const std::vector<uint8_t>> bytes) {
+    if (!pool_ || pool_->threads() <= 0 || !bytes || bytes->empty()) return;
     auto pf = std::make_shared<DecodeState::Pipe>();
     pf->consumed = 1; // frame 0 already delivered by start_decode
-    const auto loader_copy = loader_;
-    const bool ok = pool_->submit_long([pf, loader_copy, file, loop_play] {
-        auto bytes = loader_copy(file);
-        std::unique_ptr<VideoSource> src =
-            bytes ? open_any_source(*bytes) : nullptr;
+    const bool ok = pool_->submit_long([pf, bytes, loop_play] {
+        std::unique_ptr<VideoSource> src = open_any_source(*bytes);
         auto give_up = [&] {
             std::lock_guard<std::mutex> lk(pf->mu);
             pf->eof = true;
             pf->cv.notify_all();
         };
         if (!src) {
+            give_up();
+            return;
+        }
+        // Frame 0 is already current on the caller; skip it so seq 1 is
+        // the second picture (a fresh decoder would otherwise re-deliver 0).
+        if (!src->read_frame()) {
             give_up();
             return;
         }
@@ -155,11 +164,16 @@ void VideoEngine::start_pipe(DecodeState& ds, const std::string& file, bool loop
                     return;
                 }
             }
-            std::lock_guard<std::mutex> lk(pf->mu);
+            const auto& rgba = src->rgba();
             const size_t px = size_t(src->width()) * size_t(src->height()) * 4;
+            if (px == 0 || rgba.size() < px) {
+                give_up();
+                return;
+            }
+            std::lock_guard<std::mutex> lk(pf->mu);
             const int slot = int(seq % 2);
             if (pf->buf[slot].size() != px) pf->buf[slot].resize(px);
-            std::memcpy(pf->buf[slot].data(), src->rgba().data(), px);
+            std::memcpy(pf->buf[slot].data(), rgba.data(), px);
             pf->w = src->width();
             pf->h = src->height();
             pf->produced = seq;
@@ -177,18 +191,27 @@ VideoEngine::~VideoEngine() {
 
 namespace {
 /// Open the first decodable whole-file source for `bytes`.
-/// Decoder preference: the always-compiled Ogg/Theora backend first, then
-/// the optional FFmpeg backend (any other libavformat container: ASF/WMV3
-/// and beyond). Returns nullptr when no backend accepts the data.
+/// With FFmpeg: that backend only (Ogg/Theora included). libtheora's padded
+/// Y stride vs a tightly-sized plane has heap-smashed Windows (0xC0000374)
+/// on story overlays such as snow03.ogv. OA_FORCE_THEORA=1 re-enables the
+/// Theora fallback for A/B. Without FFmpeg, Theora is the only decoder.
 std::unique_ptr<VideoSource> open_any_source(const std::vector<uint8_t>& bytes) {
-    if (auto s = TheoraSource::open(bytes)) return s;
 #if defined(OA_HAVE_FFMPEG) && OA_HAVE_FFMPEG
+    if (auto s = FfmpegSource::open(bytes)) return s;
+    if (!std::getenv("OA_FORCE_THEORA")) {
+        if (std::getenv("OA_VIDEO_DEBUG")) {
+            std::fprintf(stderr,
+                         "[video] ffmpeg rejected bytes=%zu; theora fallback off\n",
+                         bytes.size());
+        }
+        return nullptr;
+    }
     if (std::getenv("OA_VIDEO_DEBUG")) {
-        std::fprintf(stderr, "[video] not ogg/theora; trying ffmpeg backend (bytes=%zu)\n",
+        std::fprintf(stderr, "[video] ffmpeg rejected bytes=%zu; OA_FORCE_THEORA\n",
                      bytes.size());
     }
-    if (auto s = FfmpegSource::open(bytes)) return s;
 #endif
+    if (auto s = TheoraSource::open(bytes)) return s;
     return nullptr;
 }
 } // namespace
@@ -310,14 +333,15 @@ bool VideoEngine::start_decode(VideoChannel& channel, DecodeState& ds) {
         }
         return false;
     }
-    const auto bytes = loader_(channel.file);
-    if (!bytes || bytes->empty()) {
+    auto loaded = loader_(channel.file);
+    if (!loaded || loaded->empty()) {
         if (std::getenv("OA_VIDEO_DEBUG")) {
             std::fprintf(stderr, "[video] loader returned no bytes for '%s'\n",
                          channel.file.c_str());
         }
         return false;
     }
+    auto bytes = std::make_shared<const std::vector<uint8_t>>(std::move(*loaded));
     auto src = open_any_source(*bytes);
     if (!src || !src->read_frame()) {
         if (std::getenv("OA_VIDEO_DEBUG")) {
@@ -343,7 +367,16 @@ bool VideoEngine::start_decode(VideoChannel& channel, DecodeState& ds) {
     // audio stream, attach the companion source — the movie plays with its
     // container sound (its own demux/decoder, so the pipe worker's video
     // stream stays independent). Fails silently for video-only files.
-    if (!ds.audio && bytes && !bytes->empty()) {
+    //
+    // Skip FFmpeg's Ogg probe: Theora already owns these files, and
+    // avformat_open_input + custom AVIO on Ogg has been a Windows heap-smash
+    // (0xC0000374) right after 开始游戏 attaches snow03.ogv.
+    const bool ogg = bytes->size() >= 4 && (*bytes)[0] == 'O' && (*bytes)[1] == 'g' &&
+                     (*bytes)[2] == 'g' && (*bytes)[3] == 'S';
+    if (!ogg && !ds.audio && !bytes->empty()) {
+        if (std::getenv("OA_VIDEO_DEBUG"))
+            std::fprintf(stderr, "[video] probing movie audio for '%s'\n",
+                         channel.file.c_str());
         auto audio = FfmpegAudioSource::open(*bytes);
         if (audio) {
             ds.audio = std::move(audio);
@@ -355,23 +388,30 @@ bool VideoEngine::start_decode(VideoChannel& channel, DecodeState& ds) {
                              ds.audio->channels());
             }
         }
+    } else if (ogg && std::getenv("OA_VIDEO_DEBUG")) {
+        std::fprintf(stderr, "[video] skip ffmpeg audio probe on ogg '%s'\n",
+                     channel.file.c_str());
     }
 #endif
     // auto-detect the `<stem>_m` sibling and attach it as the
     // mask partner (frame 0 composite in place on success). A missing /
     // undecodable / size-mismatched sibling leaves the channel byte-identical
     // to the unmasked pipeline.
-    attach_mask(channel, ds);
+    if (!std::getenv("OA_NO_VIDEO_MASK"))
+        attach_mask(channel, ds);
+    else if (std::getenv("OA_VIDEO_DEBUG"))
+        std::fprintf(stderr, "[video] OA_NO_VIDEO_MASK: skip _m sibling\n");
     // Optional decode-pool worker: decodes frame 1+ ahead (frame 0 is
     // current). Falls back to the sync decoder on lag/cancel. The worker
     // only ever decodes the MAIN stream; the mask partner is stepped by the
     // caller (step_mask) one frame per delivered main frame, so both
     // delivery paths stay phase-locked without touching the worker.
-    start_pipe(ds, channel.file, channel.loop_play);
+    start_pipe(ds, channel.loop_play, bytes);
     if (std::getenv("OA_VIDEO_DEBUG")) {
         std::fprintf(stderr, "[video] source attached '%s' %dx%d @%.2ffps\n",
                      channel.file.c_str(), ds.width, ds.height,
                      ds.frame_interval_ms > 0.0 ? 1000.0 / ds.frame_interval_ms : 0.0);
+        std::fflush(stderr);
     }
     return true;
 }
@@ -420,8 +460,8 @@ bool VideoEngine::attach_mask(VideoChannel& channel, DecodeState& ds) {
     mp->h = ds.height;
     ds.mask = std::move(mp);
     channel.mask_on = true;
-    bake_video_mask_alpha(ds.rgba.data(), ds.width, ds.height,
-                          ds.mask->src->rgba().data());
+    bake_video_mask_alpha(ds.rgba.data(), ds.rgba.size(), ds.width, ds.height,
+                          ds.mask->src->rgba().data(), ds.mask->src->rgba().size());
     if (std::getenv("OA_VIDEO_DEBUG")) {
         std::fprintf(stderr, "[video] mask partner attached '%s' + '%s' "
                              "%dx%d (composited)\n",
@@ -482,8 +522,8 @@ void VideoEngine::step_mask(const VideoChannel& channel, DecodeState& ds) {
     }
     // Composite in place: rgb untouched (the mask never colors the main),
     // alpha = luma-key(main) * mask-gray / 255.
-    bake_video_mask_alpha(ds.rgba.data(), ds.width, ds.height,
-                          mp->src->rgba().data());
+    bake_video_mask_alpha(ds.rgba.data(), ds.rgba.size(), ds.width, ds.height,
+                          mp->src->rgba().data(), mp->src->rgba().size());
 }
 
 void VideoEngine::play_overlay(const VideoConfig& config) {
@@ -577,6 +617,11 @@ void VideoEngine::play_layer(const std::string& id, const VideoConfig& config) {
     DecodeState ds;
     if (start_decode(state_.video_layers[id], ds)) {
         decode_[id] = std::move(ds);
+        if (std::getenv("OA_VIDEO_DEBUG")) {
+            std::fprintf(stderr, "[video] play_layer '%s' decode parked %dx%d\n",
+                         id.c_str(), decode_[id].width, decode_[id].height);
+            std::fflush(stderr);
+        }
         ensure_driver();
         return;
     }
@@ -789,8 +834,17 @@ void VideoEngine::pump_channel(VideoChannel& channel, DecodeState& ds) {
                                 [&] { return pf->cancel || pf->eof || pf->produced >= want; });
                 if (pf->produced >= want) {
                     const size_t px = size_t(pf->w) * size_t(pf->h) * 4;
+                    const int slot = int(want % 2);
+                    if (px == 0 || pf->buf[slot].size() < px) {
+                        lk.unlock();
+                        cancel_pipe(ds);
+                        channel.playing = false;
+                        queue_finish_locked(channel.id == kOverlayVideoId ? std::string()
+                                                                           : channel.id);
+                        return;
+                    }
                     if (ds.rgba.size() != px) ds.rgba.resize(px);
-                    std::memcpy(ds.rgba.data(), pf->buf[want % 2].data(), px);
+                    std::memcpy(ds.rgba.data(), pf->buf[slot].data(), px);
                     ds.width = pf->w;
                     ds.height = pf->h;
                     ++ds.revision;
@@ -932,7 +986,9 @@ bool VideoEngine::video_frame(const std::string& id, int* w, int* h, const uint8
     const std::string key = id.empty() ? kOverlayVideoId : id;
     std::lock_guard<std::mutex> lk(engine_mutex_);
     const DecodeState* ds = decode_of(key);
-    if (!ds || ds->rgba.empty()) return false;
+    if (!ds || ds->rgba.empty() || ds->width <= 0 || ds->height <= 0) return false;
+    const size_t need = size_t(ds->width) * size_t(ds->height) * 4;
+    if (ds->rgba.size() < need) return false;
     if (w) *w = ds->width;
     if (h) *h = ds->height;
     auto& staging = frame_staging_[key];
@@ -973,7 +1029,7 @@ inline uint8_t clamp8(int v) {
 /// `yuv` planes cover the full encoded frame; the displayed picture starts
 /// at (pic_x, pic_y) and is w*h. Chroma is decimated by (cx, cy) shifts
 /// according to the stream's pixel format.
-void ycbcr_to_rgba(const th_ycbcr_buffer yuv, int pic_x, int pic_y, int w, int h,
+bool ycbcr_to_rgba(const th_ycbcr_buffer yuv, int pic_x, int pic_y, int w, int h,
                    int cx, int cy, std::vector<uint8_t>& rgba) {
     const unsigned char* Y = yuv[0].data;
     const unsigned char* U = yuv[1].data;
@@ -981,6 +1037,23 @@ void ycbcr_to_rgba(const th_ycbcr_buffer yuv, int pic_x, int pic_y, int w, int h
     const int ys = yuv[0].stride;
     const int us = yuv[1].stride;
     const int vs = yuv[2].stride;
+    if (!Y || !U || !V || w <= 0 || h <= 0 || ys <= 0 || us <= 0 || vs <= 0) return false;
+    if (pic_x < 0 || pic_y < 0) return false;
+    if (rgba.size() < size_t(w) * size_t(h) * 4) return false;
+    const int last_y = pic_y + h - 1;
+    const int last_x = pic_x + w - 1;
+    // Index is data + fy*stride + fx: last column must fit in the row pitch,
+    // not only in the reported plane width (padded Theora strides).
+    if (last_x >= ys) return false;
+    if (yuv[0].width > 0 && last_x >= yuv[0].width) return false;
+    if (yuv[0].height > 0 && last_y >= yuv[0].height) return false;
+    const int last_c_x = last_x >> cx;
+    const int last_c_y = last_y >> cy;
+    if (last_c_x >= us || last_c_x >= vs) return false;
+    if (yuv[1].width > 0 && last_c_x >= yuv[1].width) return false;
+    if (yuv[2].width > 0 && last_c_x >= yuv[2].width) return false;
+    if (yuv[1].height > 0 && last_c_y >= yuv[1].height) return false;
+    if (yuv[2].height > 0 && last_c_y >= yuv[2].height) return false;
     for (int py = 0; py < h; ++py) {
         const int fy = pic_y + py; // full-frame row of this picture row
         uint8_t* out = rgba.data() + size_t(py) * size_t(w) * 4;
@@ -998,6 +1071,7 @@ void ycbcr_to_rgba(const th_ycbcr_buffer yuv, int pic_x, int pic_y, int w, int h
             out[px * 4 + 3] = 255;
         }
     }
+    return true;
 }
 } // namespace
 
@@ -1180,8 +1254,24 @@ bool TheoraSource::read_frame() {
             if (th_decode_packetin(p_->dec, &packet, &granpos) == 0) {
                 th_ycbcr_buffer yuv;
                 if (th_decode_ycbcr_out(p_->dec, yuv) == 0) {
-                    ycbcr_to_rgba(yuv, int(p_->info.pic_x), int(p_->info.pic_y),
-                                  width_, height_, p_->chroma_x, p_->chroma_y, rgba_);
+                    if (!ycbcr_to_rgba(yuv, int(p_->info.pic_x), int(p_->info.pic_y),
+                                       width_, height_, p_->chroma_x, p_->chroma_y, rgba_)) {
+                        continue;
+                    }
+                    if (std::getenv("OA_VIDEO_DEBUG")) {
+                        static int s_once;
+                        if (s_once++ < 4) {
+                            std::fprintf(stderr,
+                                         "[video] theora frame pic=%dx%d off=%d,%d "
+                                         "frame=%dx%d y=%dx%d s=%d u=%dx%d s=%d\n",
+                                         width_, height_, int(p_->info.pic_x),
+                                         int(p_->info.pic_y), int(p_->info.frame_width),
+                                         int(p_->info.frame_height), yuv[0].width,
+                                         yuv[0].height, yuv[0].stride, yuv[1].width,
+                                         yuv[1].height, yuv[1].stride);
+                            std::fflush(stderr);
+                        }
+                    }
                     return true;
                 }
             }
@@ -1221,6 +1311,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/pixdesc.h>
+#include <errno.h>
 }
 
 namespace oa::media {
@@ -1237,6 +1328,7 @@ struct MemIo {
 
 int mem_read(void* opaque, uint8_t* buf, int size) {
     auto* io = static_cast<MemIo*>(opaque);
+    if (size < 0) return AVERROR(EINVAL);
     const std::vector<uint8_t>& b = *io->bytes;
     if (io->pos >= b.size()) return 0; // EOF
     const size_t n = std::min<size_t>(size_t(size), b.size() - io->pos);
@@ -1286,7 +1378,9 @@ bool yuv_frame_to_rgba(const AVFrame* f, std::vector<uint8_t>& rgba, int* out_w,
                        int* out_h) {
     const int w = f->width;
     const int h = f->height;
-    if (w <= 0 || h <= 0 || !f->data[0] || !f->data[1] || !f->data[2]) return false;
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192 ||
+        !f->data[0] || !f->data[1] || !f->data[2])
+        return false;
     const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(f->format));
     if (!d) return false;
     if (d->nb_components != 3 || (d->flags & AV_PIX_FMT_FLAG_RGB) ||
@@ -1298,13 +1392,18 @@ bool yuv_frame_to_rgba(const AVFrame* f, std::vector<uint8_t>& rgba, int* out_w,
     const int cy = d->log2_chroma_h;
     const bool full_range = f->color_range == AVCOL_RANGE_JPEG;
 
+    const int ys = f->linesize[0];
+    const int us = f->linesize[1];
+    const int vs = f->linesize[2];
+    const int cw = (w + ((1 << cx) - 1)) >> cx;
+    const int ch = (h + ((1 << cy) - 1)) >> cy;
+    if (ys < w || us < cw || vs < cw || ys <= 0 || us <= 0 || vs <= 0) return false;
+    if (ch <= 0 || cw <= 0) return false;
+
     rgba.assign(rgba_bytes(w, h), 0);
     const unsigned char* Y = f->data[0];
     const unsigned char* U = f->data[1];
     const unsigned char* V = f->data[2];
-    const int ys = f->linesize[0];
-    const int us = f->linesize[1];
-    const int vs = f->linesize[2];
     for (int py = 0; py < h; ++py) {
         uint8_t* out = rgba.data() + size_t(py) * size_t(w) * 4;
         const unsigned char* yr = Y + size_t(py) * size_t(ys);
@@ -1340,10 +1439,15 @@ bool yuv_frame_to_rgba(const AVFrame* f, std::vector<uint8_t>& rgba, int* out_w,
 /// AVIO/decoder state behind the pimpl (all pointers owned here).
 struct FfmpegSource::Impl {
     ~Impl() {
-        // CUSTOM_IO keeps fmt from freeing our AVIOContext; free it (and its
-        // internal buffer) after the demuxer is gone.
-        if (fmt) avformat_close_input(&fmt);
+        // Detach our AVIO before close_input: some FFmpeg builds still free
+        // pb on CUSTOM_IO, and a second avio_context_free is heap corruption
+        // (typical on 开始游戏 opening movies).
+        if (fmt) {
+            fmt->pb = nullptr;
+            avformat_close_input(&fmt);
+        }
         if (avio) avio_context_free(&avio);
+        iobuf = nullptr; // owned by avio_context_free
         if (dec) avcodec_free_context(&dec);
         if (frame) av_frame_free(&frame);
         if (pkt) av_packet_free(&pkt);
@@ -1406,8 +1510,13 @@ bool FfmpegSource::init_stream() {
     fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
     const int orc = avformat_open_input(&fmt, nullptr, nullptr, nullptr);
     if (orc < 0) {
-        // avformat_open_input freed `fmt` on failure; our AVIO is untouched.
-        avio_context_free(&S.avio);
+        // avformat_open_input frees `fmt` and, on many builds, also closes
+        // pb even with AVFMT_FLAG_CUSTOM_IO. A second avio_context_free is
+        // heap corruption (0xC0000374). Leave the pointers null so ~Impl
+        // does not free them again; leaking one 64KB IO buffer on a failed
+        // probe is cheaper than a smash.
+        S.avio = nullptr;
+        S.iobuf = nullptr;
         return false;
     }
     S.fmt = fmt;
@@ -1616,8 +1725,12 @@ float pcm_sample(const AVFrame* f, const FmtSpec& s, int c, int i) {
 
 struct FfmpegAudioSource::Impl {
     ~Impl() {
-        if (fmt) avformat_close_input(&fmt);
+        if (fmt) {
+            fmt->pb = nullptr;
+            avformat_close_input(&fmt);
+        }
         if (avio) avio_context_free(&avio);
+        iobuf = nullptr;
         if (dec) avcodec_free_context(&dec);
         if (frame) av_frame_free(&frame);
         if (pkt) av_packet_free(&pkt);
@@ -1682,7 +1795,9 @@ bool FfmpegAudioSource::init_stream() {
     fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
     const int orc = avformat_open_input(&fmt, nullptr, nullptr, nullptr);
     if (orc < 0) {
-        avio_context_free(&S.avio);
+        // Same as FfmpegSource: open_input may free pb; do not free twice.
+        S.avio = nullptr;
+        S.iobuf = nullptr;
         return false;
     }
     S.fmt = fmt;

@@ -86,6 +86,11 @@ bool SdlRenderBackend::create(SDL_Window* window, int stage_w, int stage_h,
     }
     renderer_ = SDL_CreateRenderer(window, nullptr);
     if (!renderer_) return false;
+    // Match GLES: present waits on vblank (GPU idle) instead of spinning.
+    if (!SDL_SetRenderVSync(renderer_, 1)) {
+        std::fprintf(stderr, "[sdl] SDL_SetRenderVSync failed: %s\n",
+                     SDL_GetError());
+    }
     // Logical presentation（注释见 renderer.cpp create_renderer）：
     // 引擎场景 = 项目 stage 尺寸；SDL3 把 stage 呈现到真实窗口
     // （letterbox 等比居中放大），绘制坐标恒为引擎坐标，窗口坐标鼠标事件
@@ -245,6 +250,16 @@ void SdlRenderBackend::update_texture(TextureRef t, const uint8_t* rgba,
                                       int pitch)
 {
     SDL_UpdateTexture(sdl_tex(t), nullptr, rgba, pitch);
+}
+
+bool SdlRenderBackend::update_texture_region(TextureRef t, int x, int y,
+                                             int w, int h,
+                                             const uint8_t* rgba, int pitch)
+{
+    SDL_Texture* tex = sdl_tex(t);
+    if (!tex || !rgba || w <= 0 || h <= 0) return false;
+    const SDL_Rect r{ x, y, w, h };
+    return SDL_UpdateTexture(tex, &r, rgba, pitch);
 }
 
 bool SdlRenderBackend::lock_texture(TextureRef t, uint8_t** pixels, int* pitch)

@@ -36,7 +36,7 @@ struct Options {
     // choice.
     std::string pfs;
     uint64_t frames_target = 0; // 0 => run continuously (no self-check exit)
-    int fps = 0;                // 0 => legacy ~8 ms delay + real-delta pacing
+    int fps = 0;                // 0 => 60 Hz (vsync + cap); >0 overrides cap
     bool headless = false;      // no window/renderer, virtual 16 ms ticks
     std::string dump;           // --dump PATH (PPM snapshot at end-of-run)
     bool dump_on_end = false;   // OA_DUMP_FRAME or --dump
@@ -44,7 +44,7 @@ struct Options {
     // own OS family: an Android APK boots the [android]
     // section, the browser build [wasm], desktop keeps the historical
     // [windows] default (override with --platform NAME).
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     std::string platform = "android";
 #elif defined(__EMSCRIPTEN__)
     std::string platform = "wasm";
@@ -55,7 +55,11 @@ struct Options {
     // SDL3 SDL_Render path, pixel behavior unchanged) or "gles" (native
     // GLES renderer with the same semantics). --renderer NAME or the
     // OA_RENDERER env var; ignored by --headless (no window, no renderer).
+#ifdef OA_USE_SDL2
+    std::string renderer = "gles";
+#else
     std::string renderer = "sdl";
+#endif
 };
 
 // Host run state: created in SDL_AppInit, driven by SDL_AppIterate; the

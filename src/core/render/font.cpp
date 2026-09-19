@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 
 // 字体
 namespace oa::render {
@@ -108,20 +109,25 @@ bool raster_edge_alpha(FT_Library lib, FT_Stroker stroker, FT_Face face,
                     if (FT_Glyph_To_Bitmap(&glyph, FT_RENDER_MODE_NORMAL, nullptr, 1) == 0) {
                         const FT_BitmapGlyph bg = (const FT_BitmapGlyph)glyph;
                         const FT_Bitmap& bm = bg->bitmap;
-                        if (bm.width > 0 && bm.rows > 0) {
+                        if (bm.width > 0 && bm.rows > 0 && bm.buffer) {
+                            const int pitch = bm.pitch;
+                            if (std::abs(pitch) >= (int)bm.width) {
                             out->width = (int)bm.width;
                             out->height = (int)bm.rows;
                             out->left = bg->left;
                             out->top = bg->top;
                             out->alpha.assign(size_t(bm.width) * bm.rows, 0);
-                            const int pitch = bm.pitch;
                             for (unsigned y = 0; y < bm.rows; ++y) {
-                                const uint8_t* src = bm.buffer +
-                                    (pitch >= 0 ? (long)y * pitch : -(long)y * pitch);
+                                const uint8_t* src =
+                                    pitch >= 0
+                                        ? bm.buffer + size_t(y) * size_t(pitch)
+                                        : bm.buffer + size_t(bm.rows - 1 - y) *
+                                                          size_t(-pitch);
                                 for (unsigned x = 0; x < bm.width; ++x)
                                     out->alpha[size_t(y) * bm.width + x] = src[x];
                             }
                             have_ring = true;
+                            }
                         }
                     }
                 }
@@ -134,12 +140,15 @@ bool raster_edge_alpha(FT_Library lib, FT_Stroker stroker, FT_Face face,
     // ── 退路：全向圆盘膨胀（源 = 已渲染 alpha 位图，盒外扩 r px 防裁切）──
     if (FT_Load_Char(face, (FT_ULong)cp, FT_LOAD_RENDER) != 0) return false;
     const FT_Bitmap& bm = face->glyph->bitmap;
-    if (bm.width == 0 || bm.rows == 0) return false;
+    if (bm.width == 0 || bm.rows == 0 || !bm.buffer) return false;
     const int r = (int)std::lround(width_px);
     const int pitch = bm.pitch;
+    if (std::abs(pitch) < (int)bm.width) return false;
     auto src_at = [&](int x, int y) -> int {
         if (x < 0 || y < 0 || x >= (int)bm.width || y >= (int)bm.rows) return 0;
-        const uint8_t* row = bm.buffer + (pitch >= 0 ? (long)y * pitch : -(long)y * pitch);
+        const uint8_t* row =
+            pitch >= 0 ? bm.buffer + size_t(y) * size_t(pitch)
+                       : bm.buffer + size_t(bm.rows - 1 - y) * size_t(-pitch);
         return row[x];
     };
     out->width = (int)bm.width + 2 * r;
@@ -172,6 +181,9 @@ bool raster_edge_alpha(FT_Library lib, FT_Stroker stroker, FT_Face face,
             const FT_Bitmap& fbm = face->glyph->bitmap;
             const int fl = face->glyph->bitmap_left, ft = face->glyph->bitmap_top;
             const int fpitch = fbm.pitch;
+            if (std::abs(fpitch) < (int)fbm.width) {
+                // skip cover_fill rather than read off the bitmap
+            } else {
             const int cmin = std::min(out->left, fl);
             const int cmax = std::max(out->left + out->width, fl + (int)fbm.width);
             const int tmax = std::max(out->top, ft);
@@ -188,8 +200,10 @@ bool raster_edge_alpha(FT_Library lib, FT_Stroker stroker, FT_Face face,
                             (out->left + i - n.left)] =
                         out->alpha[size_t(j) * out->width + i];
             for (unsigned j = 0; j < fbm.rows; ++j) {
-                const uint8_t* row = fbm.buffer +
-                    (fpitch >= 0 ? (long)j * fpitch : -(long)j * fpitch);
+                const uint8_t* row =
+                    fpitch >= 0
+                        ? fbm.buffer + size_t(j) * size_t(fpitch)
+                        : fbm.buffer + size_t(fbm.rows - 1 - j) * size_t(-fpitch);
                 for (unsigned i = 0; i < fbm.width; ++i) {
                     if (row[i] == 0) continue;
                     n.alpha[size_t(n.top - 1 - (ft - 1 - (int)j)) * n.width +
@@ -197,6 +211,7 @@ bool raster_edge_alpha(FT_Library lib, FT_Stroker stroker, FT_Face face,
                 }
             }
             *out = std::move(n);
+            }
         }
     }
     return true;
@@ -260,13 +275,81 @@ FontSystem::~FontSystem()
     // 字形纹理经后端销毁（release_all 已 shutdown 渲染器时与后端抽象前直接
     // SDL_DestroyTexture 同语义——sdl 后端 destroy 不依赖渲染器存活）。
     for (auto& [k, cg] : glyph_cache)
-        if (cg.tex && backend_) backend_->destroy_texture(cg.tex);
+        if (cg.tex && !cg.in_atlas && backend_) backend_->destroy_texture(cg.tex);
     for (auto& [k, cg] : edge_cache)
-        if (cg.tex && backend_) backend_->destroy_texture(cg.tex);
+        if (cg.tex && !cg.in_atlas && backend_) backend_->destroy_texture(cg.tex);
+    for (auto& p : atlas_pages_)
+        if (p.tex && backend_) backend_->destroy_texture(p.tex);
     for (auto& [k, fe] : font_faces)
         if (fe.face) FT_Done_Face(fe.face);
     if (stroker_) FT_Stroker_Done(stroker_);
     if (ft_lib) FT_Done_FreeType(ft_lib);
+}
+
+// ---------------------------------------------------------------------------
+// 字形图集
+// ---------------------------------------------------------------------------
+
+oa::render::TextureRef FontSystem::atlas_insert(
+    oa::render::RenderBackend* backend, const std::vector<uint8_t>& rgba,
+    int w, int h, float* sx, float* sy)
+{
+    if (atlas_failed_ || !backend || w <= 0 || h <= 0) return nullptr;
+    const int pw = w + 2; // 1px 边缘复制 padding（四边）
+    const int ph = h + 2;
+    if (pw > kAtlasSize || ph > kAtlasSize) return nullptr; // 巨型字形 → 独立纹理
+    for (;;) {
+        if (atlas_pages_.empty()) atlas_pages_.push_back(AtlasPage{});
+        AtlasPage& p = atlas_pages_.back();
+        if (!p.tex) { // 新页：建纹理并整页清零
+            p.tex = backend->create_texture(kAtlasSize, kAtlasSize,
+                                            oa::render::TextureAccess::Static);
+            if (!p.tex) {
+                atlas_pages_.pop_back();
+                atlas_failed_ = true;
+                return nullptr;
+            }
+            // create_texture 内容未定义：先整页清零（padding 区 alpha=0，
+            // 防图集空位颜色经线性滤波渗入字形边缘）。
+            std::vector<uint8_t> zero(size_t(kAtlasSize) * kAtlasSize * 4, 0);
+            backend->update_texture(p.tex, zero.data(), kAtlasSize * 4);
+            backend->set_texture_blend(p.tex, oa::render::BlendMode::Blend);
+        }
+        if (p.pen_x + pw > kAtlasSize) { // 换行
+            p.pen_x = 0;
+            p.pen_y += p.row_h;
+            p.row_h = 0;
+        }
+        if (p.pen_y + ph > kAtlasSize) { // 页满 → 新页
+            if (atlas_pages_.size() >= kAtlasMaxPages) {
+                atlas_failed_ = true;
+                return nullptr;
+            }
+            atlas_pages_.push_back(AtlasPage{});
+            continue;
+        }
+        // 构造含 padding 的位图：边缘 1px = 邻接边缘像素复制。
+        std::vector<uint8_t> pad(size_t(pw) * ph * 4);
+        for (int y = 0; y < ph; ++y) {
+            const int gy = y < 1 ? 0 : (y > h ? h - 1 : y - 1);
+            const uint8_t* srow = rgba.data() + size_t(gy) * w * 4;
+            uint8_t* drow = pad.data() + size_t(y) * pw * 4;
+            for (int x = 0; x < pw; ++x) {
+                const int gx = x < 1 ? 0 : (x > w ? w - 1 : x - 1);
+                std::memcpy(drow + size_t(x) * 4, srow + size_t(gx) * 4, 4);
+            }
+        }
+        if (!backend->update_texture_region(p.tex, p.pen_x, p.pen_y, pw, ph,
+                                            pad.data(), pw * 4)) {
+            atlas_failed_ = true; // 后端不支持子区域更新 → 永久回退
+            return nullptr;
+        }
+        *sx = float(p.pen_x + 1);
+        *sy = float(p.pen_y + 1);
+        p.pen_x += pw;
+        p.row_h = p.row_h > ph ? p.row_h : ph;
+        return p.tex;
+    }
 }
 
 FT_Face FontSystem::load_font_face(const std::string& logical)
@@ -412,26 +495,44 @@ FontSystem::CachedGlyph FontSystem::glyph_slot(oa::render::RenderBackend* backen
     if (FT_Set_Pixel_Sizes(face, 0, (FT_UInt)ppem) == 0 &&
         FT_Load_Char(face, (FT_ULong)cp, FT_LOAD_RENDER) == 0) {
         FT_Bitmap& bm = face->glyph->bitmap;
-        if (bm.width > 0 && bm.rows > 0) {
+        if (bm.width > 0 && bm.rows > 0 && bm.buffer) {
+            const int pitch = bm.pitch;
+            if (std::abs(pitch) >= (int)bm.width) {
             std::vector<uint8_t> rgba;
             rgba.reserve(size_t(bm.width) * bm.rows * 4);
             for (unsigned y = 0; y < bm.rows; ++y) {
+                const uint8_t* row =
+                    pitch >= 0 ? bm.buffer + size_t(y) * size_t(pitch)
+                               : bm.buffer + size_t(bm.rows - 1 - y) * size_t(-pitch);
                 for (unsigned x = 0; x < bm.width; ++x) {
-                    const uint8_t a = bm.buffer[y * bm.pitch + x];
+                    const uint8_t a = row[x];
                     rgba.push_back(255);
                     rgba.push_back(255);
                     rgba.push_back(255);
                     rgba.push_back(a);
                 }
             }
-            cg.tex = backend->create_texture((int)bm.width, (int)bm.rows,
-                                             oa::render::TextureAccess::Static);
-            if (cg.tex) {
-                backend->update_texture(cg.tex, rgba.data(), (int)bm.width * 4);
-                backend->set_texture_blend(cg.tex, oa::render::BlendMode::Blend);
+            cg.w = (int)bm.width;
+            cg.h = (int)bm.rows;
+            // 优先图集（合批前提）；后端不支持/页满 → 独立纹理回退。
+            float sx = 0, sy = 0;
+            if (oa::render::TextureRef at =
+                    atlas_insert(backend, rgba, cg.w, cg.h, &sx, &sy)) {
+                cg.tex = at;
+                cg.src_x = sx;
+                cg.src_y = sy;
+                cg.in_atlas = true;
+            } else {
+                cg.tex = backend->create_texture((int)bm.width, (int)bm.rows,
+                                                 oa::render::TextureAccess::Static);
+                if (cg.tex) {
+                    backend->update_texture(cg.tex, rgba.data(), (int)bm.width * 4);
+                    backend->set_texture_blend(cg.tex, oa::render::BlendMode::Blend);
+                }
             }
             cg.bitmap_left = face->glyph->bitmap_left;
             cg.bitmap_top = face->glyph->bitmap_top;
+            }
         }
     }
     glyph_cache[key] = cg; // 缺字形/栅格失败 → 空槽占位（不再重试）
@@ -464,11 +565,22 @@ FontSystem::CachedGlyph FontSystem::edge_slot(oa::render::RenderBackend* backend
             rgba.push_back(255);
             rgba.push_back(a);
         }
-        cg.tex = backend->create_texture(eb.width, eb.height,
-                                         oa::render::TextureAccess::Static);
-        if (cg.tex) {
-            backend->update_texture(cg.tex, rgba.data(), eb.width * 4);
-            backend->set_texture_blend(cg.tex, oa::render::BlendMode::Blend);
+        cg.w = eb.width;
+        cg.h = eb.height;
+        float sx = 0, sy = 0;
+        if (oa::render::TextureRef at =
+                atlas_insert(backend, rgba, cg.w, cg.h, &sx, &sy)) {
+            cg.tex = at;
+            cg.src_x = sx;
+            cg.src_y = sy;
+            cg.in_atlas = true;
+        } else {
+            cg.tex = backend->create_texture(eb.width, eb.height,
+                                             oa::render::TextureAccess::Static);
+            if (cg.tex) {
+                backend->update_texture(cg.tex, rgba.data(), eb.width * 4);
+                backend->set_texture_blend(cg.tex, oa::render::BlendMode::Blend);
+            }
         }
         cg.bitmap_left = eb.left;
         cg.bitmap_top = eb.top;
@@ -570,20 +682,25 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
             world.transform_point(lx, ly, wx, wy);
         }
     };
-    // 画一个字形贴图：本地左上角 (lx,ly)、尺寸取贴图实际宽高；
-    // alpha = 请求 alpha × 链不透明度（近似 cmd.opacity *= opacity）。
-    auto draw_glyph_tex = [&](oa::render::TextureRef tex, double lx, double ly,
+    // 画一个字形贴图：本地左上角 (lx,ly)、尺寸取槽缓存的位图宽高（图集
+    // 字形带 src 矩形）；alpha = 请求 alpha × 链不透明度（近似
+    // cmd.opacity *= opacity）。
+    auto draw_glyph_tex = [&](const CachedGlyph& cg, double lx, double ly,
         const oa::render::Rgba& col, double alpha) {
-            float wf = 0, hf = 0;
-            backend->texture_size(tex, &wf, &hf);
+            const float wf = float(cg.w);
+            const float hf = float(cg.h);
+            if (wf <= 0 || hf <= 0) return;
+            const oa::render::TextureRef tex = cg.tex;
             backend->set_texture_color_mod(tex, col.r, col.g, col.b);
             const int am = int(alpha * opacity + 0.5);
             backend->set_texture_alpha_mod(
                 tex, (uint8_t)(am < 0 ? 0 : am > 255 ? 255 : am));
+            oa::render::FRect srcr{ cg.src_x, cg.src_y, wf, hf };
+            const oa::render::FRect* src = cg.in_atlas ? &srcr : nullptr;
             if (plain) {
                 const oa::render::FRect dst{ float(lx + world.e),
-                    float(ly + world.f), float(wf), float(hf) };
-                backend->draw_texture(tex, nullptr, &dst);
+                    float(ly + world.f), wf, hf };
+                backend->draw_texture(tex, src, &dst);
                 return;
             }
             double x0 = 0, y0 = 0, x1 = 0, y1 = 0, x2 = 0, y2 = 0;
@@ -593,7 +710,7 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
             const oa::render::FPoint origin{ float(x0), float(y0) };
             const oa::render::FPoint right{ float(x1), float(y1) };
             const oa::render::FPoint down{ float(x2), float(y2) };
-            backend->draw_texture_affine(tex, nullptr, origin, right, down);
+            backend->draw_texture_affine(tex, src, origin, right, down);
         };
     for (const oa::render::LaidGlyph& g : page.glyphs) {
         if (g.newline || !g.font) continue;
@@ -648,7 +765,7 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
         // 偏移 +sd；平移路径下两者严格等价，仿射路径下相差旋转/缩放的 ~1px 级，
         // 记录为近似）。
         auto emit_pass = [&](double offx, double offy, const oa::render::Rgba& pc, double pa) {
-            draw_glyph_tex(cg.tex, lx + offx, ly + offy, pc, pa);
+            draw_glyph_tex(cg, lx + offx, ly + offy, pc, pa);
         };
         if (has_shadow) {
             // 数值键 = 偏移 px；纯 style 词路径保留既有 2px。
@@ -671,7 +788,7 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
                     const double ex = ml.left + g.x + double(eg.bitmap_left);
                     const double ey = line_content_top + double(g.line) * line_h +
                         gm.ascent - double(eg.bitmap_top);
-                    draw_glyph_tex(eg.tex, ex, ey, outline, 255);
+                    draw_glyph_tex(eg, ex, ey, outline, 255);
                 }
             }
         }
@@ -730,7 +847,7 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
             }
             const double lx = x_cursor + double(cg.bitmap_left);
             const double ly = ruby_line_top + (gm.ascent - double(cg.bitmap_top));
-            draw_glyph_tex(cg.tex, lx, ly, col, 255);
+            draw_glyph_tex(cg, lx, ly, col, 255);
             x_cursor += gm.advance + ruby_kerning;
             ++drawn;
         }

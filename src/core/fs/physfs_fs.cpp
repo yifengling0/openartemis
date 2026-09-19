@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -39,6 +40,15 @@ extern "C" {
 // ---------------------------------------------------------------------------
 
 namespace oa::fs {
+
+// PhysicsFS is process-global and not thread-safe. Decode-pool workers
+// (video/audio) reload assets while the tick thread reads images and
+// syssave writes — concurrent PHYSFS_openRead/write is heap corruption
+// (STATUS_HEAP_CORRUPTION / 0xC0000374 on 开始游戏 snow03.ogv).
+std::recursive_mutex& physfs_api_lock() {
+    static std::recursive_mutex mu;
+    return mu;
+}
 
 namespace {
 
@@ -970,6 +980,7 @@ PhysFileSystem::PhysFileSystem(std::string source_path, bool sidecar_dir)
 PhysFileSystem::~PhysFileSystem() = default;
 
 std::optional<std::vector<uint8_t>> PhysFileSystem::read(std::string_view path) const {
+    std::lock_guard<std::recursive_mutex> lk(physfs_api_lock());
     const std::optional<std::string> full = d_->resolve(path);
     if (!full) return std::nullopt;
     PHYSFS_File* f = PHYSFS_openRead(full->c_str());
@@ -1004,6 +1015,7 @@ std::optional<std::vector<uint8_t>> PhysFileSystem::read(std::string_view path) 
 std::optional<std::vector<uint8_t>> PhysFileSystem::read_range(std::string_view path,
                                                                uint64_t offset,
                                                                size_t len) const {
+    std::lock_guard<std::recursive_mutex> lk(physfs_api_lock());
     const std::optional<std::string> full = d_->resolve(path);
     if (!full) return std::nullopt;
     PHYSFS_File* f = PHYSFS_openRead(full->c_str());
@@ -1036,6 +1048,7 @@ std::optional<std::vector<uint8_t>> PhysFileSystem::read_range(std::string_view 
 }
 
 bool PhysFileSystem::exists(std::string_view path) const {
+    std::lock_guard<std::recursive_mutex> lk(physfs_api_lock());
     const std::optional<std::string> full = d_->resolve(path);
     if (!full) return false;
     PHYSFS_Stat st;
@@ -1043,6 +1056,7 @@ bool PhysFileSystem::exists(std::string_view path) const {
 }
 
 std::optional<std::vector<std::string>> PhysFileSystem::list(std::string_view dir) const {
+    std::lock_guard<std::recursive_mutex> lk(physfs_api_lock());
     std::string full = d_->mp;
     if (!dir.empty()) {
         const std::optional<std::string> resolved = d_->resolve(dir);
@@ -1183,6 +1197,7 @@ std::optional<std::array<int64_t, 6>> calendar_of(PHYSFS_sint64 secs) {
 
 bool WritableMount::write(const std::string& rel_path,
                           const std::vector<uint8_t>& data) {
+    std::lock_guard<std::recursive_mutex> lk(physfs_api_lock());
     if (!valid() || !rel_clean(rel_path)) return false;
     if (!ensure_write_root(root_)) return false;
     if (!mkdir_parents(rel_path)) return false;
@@ -1207,6 +1222,7 @@ bool WritableMount::write(const std::string& rel_path,
 
 std::optional<std::vector<uint8_t>> WritableMount::read(
     const std::string& rel_path) const {
+    std::lock_guard<std::recursive_mutex> lk(physfs_api_lock());
     if (!valid() || !rel_clean(rel_path)) return std::nullopt;
     const std::string full = d_->mp + "/" + rel_path;
     PHYSFS_File* f = PHYSFS_openRead(full.c_str());
@@ -1234,12 +1250,14 @@ std::optional<std::vector<uint8_t>> WritableMount::read(
 }
 
 bool WritableMount::remove(const std::string& rel_path) {
+    std::lock_guard<std::recursive_mutex> lk(physfs_api_lock());
     if (!valid() || !rel_clean(rel_path)) return false;
     if (!ensure_write_root(root_)) return false;
     return PHYSFS_delete(rel_path.c_str()) != 0;
 }
 
 bool WritableMount::exists(const std::string& rel_path) const {
+    std::lock_guard<std::recursive_mutex> lk(physfs_api_lock());
     if (!valid() || !rel_clean(rel_path)) return false;
     const std::string full = d_->mp + "/" + rel_path;
     PHYSFS_Stat st;
@@ -1248,6 +1266,7 @@ bool WritableMount::exists(const std::string& rel_path) const {
 
 std::optional<std::array<int64_t, 6>> WritableMount::modification_time(
     const std::string& rel_path) const {
+    std::lock_guard<std::recursive_mutex> lk(physfs_api_lock());
     if (!valid() || !rel_clean(rel_path)) return std::nullopt;
     const std::string full = d_->mp + "/" + rel_path;
     PHYSFS_Stat st;

@@ -156,6 +156,16 @@ public:
     virtual void destroy_texture(TextureRef t) = 0;
     /// 整幅像素更新（pitch = 每行字节）。
     virtual void update_texture(TextureRef t, const uint8_t* rgba, int pitch) = 0;
+    /// 子区域像素更新（字形图集插入）。默认不支持（false）→ 调用方回退
+    /// 独立纹理路径。
+    virtual bool update_texture_region(TextureRef t, int x, int y, int w, int h,
+                                       const uint8_t* rgba, int pitch) {
+        (void)t; (void)x; (void)y; (void)w; (void)h; (void)rgba; (void)pitch;
+        return false;
+    }
+    /// 流式纹理同尺寸帧是否可 in-place 更新（GLES: glTexSubImage2D 可靠；
+    /// sdl 软件渲染线曾观测到 in-place 更新不上屏 → 保持每帧重建）。
+    virtual bool inplace_streaming_update() const { return false; }
     /// 流式纹理像素填装（Streaming 访问方式；lock 后逐行写，再 unlock）。
     virtual bool lock_texture(TextureRef t, uint8_t** pixels, int* pitch) = 0;
     virtual void unlock_texture(TextureRef t) = 0;
@@ -174,6 +184,15 @@ public:
     // ---- 窗口 ↔ 渲染（逻辑 stage）坐标 ----
     virtual bool window_to_render(float wx, float wy, float* rx, float* ry) = 0;
     virtual bool render_to_window(float rx, float ry, float* wx, float* wy) = 0;
+
+    /// Harmony SIZE_CHANGED / surface pixels (KR2 hts_cacheWindowMetrics).
+    virtual void note_window_size(int w, int h) { (void)w; (void)h; }
+    /// Letterbox output size in pixels (EGL/drawable). False if unknown.
+    virtual bool present_size(int* w, int* h) {
+        if (w) *w = 0;
+        if (h) *h = 0;
+        return false;
+    }
 };
 
 } // namespace oa::render

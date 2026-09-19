@@ -907,8 +907,14 @@ void capture_device(const SDL_AudioSpec* spec, float* buffer, int buflen,
     }
     if (!c.enabled) return;
     const size_t frames = size_t(buflen) / (2 * sizeof(float));
+#ifdef OA_USE_SDL2
+    // Called from AudioSink::audio_callback with mutex_ held.
+    const size_t mix_after = sink ? sink->queued_frames_locked(AudioSink::kStreamMix) : 0;
+    const size_t movie_after = sink ? sink->queued_frames_locked(AudioSink::kStreamMovie) : 0;
+#else
     const size_t mix_after = sink ? sink->queued_frames(AudioSink::kStreamMix) : 0;
     const size_t movie_after = sink ? sink->queued_frames(AudioSink::kStreamMovie) : 0;
+#endif
     std::lock_guard<std::mutex> lk(c.mu_dev);
     c.dev.write(buffer, frames);
     ++c.dev_callbacks;
@@ -967,7 +973,9 @@ void AudioSink::note_device_pull(const SDL_AudioSpec* spec, int buflen) {
     const uint64_t now = SDL_GetTicks();
     for (int i = 0; i < kStreamCount; ++i) {
         if (last_push_ms_[i] == 0 || now - last_push_ms_[i] > 250) continue;
-        if (queued_frames(i) == 0) ++underruns_[i];
+        // SDL2: audio_callback already holds mutex_; queued_frames() would
+        // deadlock the device thread (non-recursive mutex) and freeze tick().
+        if (queued_frames_locked(i) == 0) ++underruns_[i];
     }
 }
 
@@ -977,6 +985,44 @@ void SDLCALL sink_postmix_cb(void* ud, const SDL_AudioSpec* spec, float* buffer,
     if (sink) sink->note_device_pull(spec, buflen);
     capture_device(spec, buffer, buflen, sink);
 }
+
+#ifdef OA_USE_SDL2
+void SDLCALL AudioSink::audio_callback(void* userdata, Uint8* stream, int len) {
+    auto* sink = static_cast<AudioSink*>(userdata);
+    if (!sink || len <= 0) {
+        if (stream && len > 0) SDL_memset(stream, 0, len);
+        return;
+    }
+    SDL_memset(stream, 0, len);
+    if (sink->mix_scratch_.size() < size_t(len))
+        sink->mix_scratch_.resize(size_t(len));
+    std::lock_guard<std::mutex> lock(sink->mutex_);
+    const SDL_AudioFormat fmt = sink->device_spec_.format;
+    const bool f32 = (fmt == AUDIO_F32SYS || fmt == AUDIO_F32);
+    for (int i = 0; i < kStreamCount; ++i) {
+        if (!sink->stream_[i]) continue;
+        const int got = SDL_AudioStreamGet(sink->stream_[i], sink->mix_scratch_.data(), len);
+        if (got <= 0) continue;
+        if (f32) {
+            auto* dst = reinterpret_cast<float*>(stream);
+            auto* src = reinterpret_cast<float*>(sink->mix_scratch_.data());
+            const int n = got / int(sizeof(float));
+            for (int s = 0; s < n; ++s) {
+                const float mixed = dst[s] + src[s];
+                dst[s] = mixed < -1.0f ? -1.0f : (mixed > 1.0f ? 1.0f : mixed);
+            }
+        } else {
+            // Mix whatever the stream had this period. Requiring got==len
+            // dropped short reads as silence (OHOS S16/S32 stutter).
+            SDL_MixAudioFormat(stream, sink->mix_scratch_.data(), fmt,
+                               (Uint32)got, SDL_MIX_MAXVOLUME);
+        }
+    }
+    sink->note_device_pull(&sink->device_spec_, len);
+    if (f32)
+        capture_device(&sink->device_spec_, reinterpret_cast<float*>(stream), len, sink);
+}
+#endif
 
 void sink_diag_after_push(int source, SDL_AudioStream* stream, size_t frames) {
     SinkDiag& d = g_sink_diag(source);
@@ -999,7 +1045,12 @@ void sink_diag_after_push(int source, SDL_AudioStream* stream, size_t frames) {
     // SDL_GetAudioStreamQueued returns BYTES (no framesize conversion in
     // SDL3); normalize to 44100 Hz stereo f32 frames (8 B/frame) so the
     // diagnostics read in the engine's sample unit.
-    const int level = SDL_GetAudioStreamQueued(stream) / 8;
+    const int level =
+#ifdef OA_USE_SDL2
+        SDL_AudioStreamAvailable(stream) / 8;
+#else
+        SDL_GetAudioStreamQueued(stream) / 8;
+#endif
     const uint64_t t_ms = uint64_t(
         std::chrono::duration_cast<std::chrono::milliseconds>(now - d.t0).count());
     if (gap_us > d.max_gap_us) d.max_gap_us = gap_us;
@@ -1431,6 +1482,7 @@ bool MediaPlayers::init()
     mix_refill_enabled_ = std::getenv("OA_AUDIO_NO_REFILL") == nullptr;
     capture_begin(sink_); // install the device-face capture (env-gated)
     std::printf("[app] audio device open (44100 Hz stereo f32)\n");
+    std::fflush(stdout);
     return true;
 }
 
