@@ -1251,6 +1251,9 @@ void Interpreter::load_external_script(const std::string& file) {
 std::vector<Instruction> Interpreter::take_tag_queue() {
     std::vector<Instruction> out;
     out.swap(tag_queue_);
+    // Taken rows are re-queued by restore_tag_queue as deferred rows: the
+    // immediate prefix no longer describes this queue.
+    immediate_tag_count_ = 0;
     return out;
 }
 
@@ -1287,6 +1290,7 @@ void Interpreter::restore_position(const std::string& script, size_t line,
     }
     current_line_ = line;
     call_stack_ = stack;
+    restore_completed_queued_barriers();
     arrived_by_jump_ = false;
     last_wait_from_queue_ = false;
 }
@@ -1303,6 +1307,7 @@ void Interpreter::start(const std::string& script, std::string_view label) {
     current_script_name_ = script;
     current_line_ = *line;
     call_stack_.clear();
+    restore_completed_queued_barriers();
     arrived_by_jump_ = false;
 }
 
@@ -1322,6 +1327,7 @@ void Interpreter::boot(const std::string& script) {
     current_script_name_ = script;
     current_line_ = line.value_or(0);
     call_stack_.clear();
+    restore_completed_queued_barriers();
     arrived_by_jump_ = false;
 }
 
@@ -1345,6 +1351,36 @@ void Interpreter::enqueue_tag(std::string tag, std::map<std::string, std::string
     ins.params = std::move(params);
     ins.line = 0;
     tag_queue_.push_back(std::move(ins));
+}
+
+void Interpreter::enqueue_tag_immediate(std::string tag,
+                                        std::map<std::string, std::string> params) {
+    Instruction ins;
+    ins.tag = std::move(tag);
+    ins.params = std::move(params);
+    ins.line = 0;
+    // Immediate rows keep the queue's prefix invariant: they land right
+    // after the rows already marked immediate and extend that prefix.
+    const size_t at = std::min(immediate_tag_count_, tag_queue_.size());
+    tag_queue_.insert(tag_queue_.begin() + static_cast<std::ptrdiff_t>(at),
+                      std::move(ins));
+    ++immediate_tag_count_;
+}
+
+void Interpreter::restore_completed_queued_barriers() {
+    // A barrier is complete once its frame (and every nested frame) has
+    // returned. Deferred rows go to the BACK: anything the callee queued
+    // during its own execution runs first (reference order).
+    while (!queued_call_barriers_.empty() &&
+           queued_call_barriers_.back().stack_depth > call_stack_.size()) {
+        QueuedCallBarrier barrier = std::move(queued_call_barriers_.back());
+        queued_call_barriers_.pop_back();
+        if (!barrier.deferred.empty()) {
+            tag_queue_.insert(tag_queue_.end(),
+                              std::make_move_iterator(barrier.deferred.begin()),
+                              std::make_move_iterator(barrier.deferred.end()));
+        }
+    }
 }
 
 ExecutionResult Interpreter::run_queued() {
@@ -1391,6 +1427,19 @@ bool tag_bool(std::string_view v, bool fallback) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return char(std::tolower(c)); });
     return s == "1" || s == "true" || s == "on" || s == "yes";
+}
+
+/// OA_JUMPDBG: print the resolution context of a jump/call whose label was
+/// missing. A Lua-queued `jump` WITHOUT a file resolves against whatever
+/// script is current when the queue drains — which is exactly the kind of
+/// host/script hand-off a compatibility bring-up needs to see (which script
+/// the tag came from, and which one it was resolved in).
+void jumpdbg_missing(const char* what, const std::string& label, const std::string& file,
+                     const std::string& cur, size_t line) {
+    if (!std::getenv("OA_JUMPDBG")) return;
+    std::fprintf(stderr, "[jumpdbg] %s not found: label=%s file=%s cur=%s:%zu\n", what,
+                 label.empty() ? "<empty>" : label.c_str(),
+                 file.empty() ? "<current>" : file.c_str(), cur.c_str(), line);
 }
 
 } // namespace
@@ -1518,7 +1567,11 @@ static TagOutcome execute_tag(Interpreter& it, const Instruction& ins, bool appl
             return out;
         }
         const auto line = cur_script->get_label_line(label);
-        if (!line) throw ScriptError("label", "jump: label not found: " + label, ins.line);
+        if (!line) {
+            jumpdbg_missing("jump", label, "", cur_script ? cur_script->name : "<none>",
+                            ins.line);
+            throw ScriptError("label", "jump: label not found: " + label, ins.line);
+        }
         out.kind = TagOutcomeKind::Jump;
         out.line = *line;
         return out;
@@ -1936,6 +1989,9 @@ ExecutionResult Interpreter::run() {
                 const Script* t = get_script(outcome.file);
                 const auto line = t->get_label_line(outcome.label);
                 if (!line) {
+                    jumpdbg_missing("jump", outcome.label, outcome.file,
+                                    current_script_name_ ? *current_script_name_ : "<none>",
+                                    ins.line);
                     throw ScriptError("label", "jump: label not found: " + outcome.label,
                                       ins.line);
                 }
@@ -1989,6 +2045,7 @@ ExecutionResult Interpreter::run() {
                     const size_t origin_line = current_line_;
                     const CallFrame frame = call_stack_.back();
                     call_stack_.pop_back();
+                    restore_completed_queued_barriers();
                     current_script_name_ = frame.script;
                     current_line_ = frame.return_line;
                     // resurrection probe: a [return]
@@ -2180,11 +2237,25 @@ oa::runtime::LuaHost Interpreter::build_lua_host() {
         if (!hooks_.file_loader) return false;
         return hooks_.file_loader(resolved).has_value();
     };
+    // Lua io.open: the game-relative name goes through the save root first
+    // (write-then-read-back must see what this session wrote), then the
+    // asset face. Both hooks are dynamic: the runtime wires them when the
+    // project opens, after this host object was built.
+    host.save_read = [this](const std::string& path) -> std::optional<std::vector<uint8_t>> {
+        if (!hooks_.save_read) return std::nullopt;
+        return hooks_.save_read(path);
+    };
+    host.save_write = [this](const std::string& path,
+                             const std::vector<uint8_t>& data) -> bool {
+        if (!hooks_.save_write) return false;
+        return hooks_.save_write(path, data);
+    };
     host.get_var = [this](const std::string& name) { return lookup_var_ptr(name); };
     host.set_var = [this](const std::string& name, oa::runtime::Value v) {
         variables_.set(name, std::move(v));
     };
-    host.enqueue_tag = [this](std::string tag, std::map<std::string, std::string> params) {
+    host.enqueue_tag = [this](std::string tag, std::map<std::string, std::string> params,
+                              bool immediate) {
         if (tag == "reset" && std::getenv("OA_DEBUG_RESET")) {
             std::fprintf(stderr, "[reset] Lua e:tag reset queued from:\n%s",
                          lua_bridge().stack_trace(10).c_str());
@@ -2199,7 +2270,11 @@ oa::runtime::LuaHost Interpreter::build_lua_host() {
         ins.tag = std::move(tag);
         ins.params = std::move(params);
         ins.line = 0;
-        tag_queue_.push_back(std::move(ins));
+        if (immediate) {
+            enqueue_tag_immediate(std::move(ins.tag), std::move(ins.params));
+        } else {
+            tag_queue_.push_back(std::move(ins));
+        }
     };
     // Lua-originated e:tag{"calllua",...} runs synchronously,
     // mirroring the inline [calllua] tag of .asb streams (the [calllua]
@@ -2678,6 +2753,7 @@ std::optional<ExecutionResult> Interpreter::flush_tag_queue() {
     while (!tag_queue_.empty()) {
         Instruction ins = std::move(tag_queue_.front());
         tag_queue_.erase(tag_queue_.begin());
+        if (immediate_tag_count_ > 0) --immediate_tag_count_;
         if (on_step) on_step(*current_script_name_, current_line_, ins);
 
         if (std::getenv("OA_SELTRACE") && ins.tag == "call" &&
@@ -2706,6 +2782,8 @@ std::optional<ExecutionResult> Interpreter::flush_tag_queue() {
                 const Script* t = get_script(outcome.file);
                 const auto line = t->get_label_line(outcome.label);
                 if (!line) {
+                    jumpdbg_missing("jump", outcome.label, outcome.file,
+                                    current_script_name_ ? *current_script_name_ : "<none>", 0);
                     throw ScriptError("label", "jump: label not found: " + outcome.label, 0);
                 }
                 current_script_name_ = outcome.file;
@@ -2718,6 +2796,22 @@ std::optional<ExecutionResult> Interpreter::flush_tag_queue() {
                 // queued call: return_line = current_line (do NOT add 1)
                 const size_t pinned = call_stack_.size();
                 call_stack_.push_back(CallFrame{*current_script_name_, current_line_});
+                // Queued-call barrier: rows queued behind this call belong to
+                // the caller's continuation, and the callee's own rows keep
+                // their right to run first. Hold them until this frame (and
+                // any nested frame) returns.
+                {
+                    const size_t split_at =
+                        std::min(immediate_tag_count_, tag_queue_.size());
+                    QueuedCallBarrier barrier;
+                    barrier.stack_depth = call_stack_.size();
+                    barrier.deferred.assign(
+                        std::make_move_iterator(tag_queue_.begin() +
+                                                static_cast<std::ptrdiff_t>(split_at)),
+                        std::make_move_iterator(tag_queue_.end()));
+                    tag_queue_.resize(split_at);
+                    queued_call_barriers_.push_back(std::move(barrier));
+                }
                 if (std::getenv("OA_SELTRACE")) {
                     const std::string* lf = ins.get("label");
                     const std::string* ff = ins.get("file");
@@ -2753,6 +2847,10 @@ std::optional<ExecutionResult> Interpreter::flush_tag_queue() {
                 current_script_name_ = target;
                 current_line_ = *line;
                 arrived_by_jump_ = true;
+                // With immediate rows still pending, keep draining them (they
+                // are the callee's reserved commands); otherwise hand control
+                // back to the step loop so the callee's body runs.
+                if (immediate_tag_count_ == 0) return std::nullopt;
                 continue;
             }
             case TagOutcomeKind::Return: {
@@ -2762,6 +2860,7 @@ std::optional<ExecutionResult> Interpreter::flush_tag_queue() {
                     const size_t origin_line = current_line_;
                     const CallFrame frame = call_stack_.back();
                     call_stack_.pop_back();
+                    restore_completed_queued_barriers();
                     current_script_name_ = frame.script;
                     current_line_ = frame.return_line;
                     // resurrection probe: a [return]

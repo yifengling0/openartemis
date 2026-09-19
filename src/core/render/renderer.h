@@ -73,6 +73,12 @@ public:
     bool read_window_surface(oa::media::Image& out);
     TextureRef make_texture(const oa::media::Image& img);
 
+    /// Compat-manifest font override passthrough (see
+    /// FontSystem::set_font_override). False when the file cannot be used.
+    bool set_font_override(const std::string& logical_path) {
+        return fontSystem && fontSystem->set_font_override(logical_path);
+    }
+
     // Pixel-read canary: read the current render target (the stage offscreen
     // target — always stage-sized and window-size
     // independent) and return its luma.

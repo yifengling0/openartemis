@@ -6,6 +6,30 @@
 
 ---
 
+## 状态更新（2026-09-19，兼容性批次之后回填）
+
+同批次的兼容性改造见 **`docs/ART3M1S_REFERENCE_NOTES.md`**（对照 art3m1s/art3m1s-core，
+已修：Lua 存档写入虚拟化、排队 call 屏障、UTF-8 路径、宿主服务桩、每游戏清单）。
+本文各阶段的实际状态：
+
+| 阶段 | 项 | 状态 |
+|---|---|---|
+| §4.2 | Release + LTO + strip（`.so` 2.15 MB） | **已完成**（构建脚本已用 Release + OHOS LTO + strip） |
+| §1.2-1 | 字形图集（多页，1024²） | **已完成**（`font.cpp` atlas_pages_） |
+| §1.2-2 | GLES draw call 合批 | **已完成**（`backend_gles.cpp` batch_append/flush_batch） |
+| §1.2-4 | `glGetError` drain 门控（`OA_RENDER_DIAG`） | **已完成** |
+| §1.2-5 | 静态帧跳过 | **已完成**（窗口线 + OHOS 的 re-blit 分支显式保留） |
+| §3.1-1 | 逻辑帧率封顶 60Hz（高刷面板） | **已完成**（`pace_windowed_frame` 在 OHOS 生效） |
+| §1.3 | 视频/E-mote 流式纹理 in-place 更新 | **部分**（GLES `update_texture` 已在；CPU 重上传路径仍存在） |
+| §1.2-3 | 绘制状态去重 | 未做 |
+| §2.1 | 图片异步解码 + 预取 + 负缓存 | 未做 |
+| §2.1-3 | 纹理 LRU 淘汰 | 未做 |
+| §3.1-2 | Lua GC 调优 | 未做 |
+| — | 分段 Profiler（逻辑/解释器/合成/上传/提交/呈现 + draw calls/上传字节） | 未做（P1 第一批：先可测量再优化） |
+| — | 脏区渲染（damage rect + scissor + 局部上传） | 未做（P1，需先做驱动 back-buffer 语义实测） |
+
+---
+
 ## 0. 结论速览（TL;DR）
 
 | 优先级 | 项 | 现状 | 预期收益 |

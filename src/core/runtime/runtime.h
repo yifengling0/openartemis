@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "core/fs/fs.h"
+#include "core/fs/compat_config.h"
 #include "core/fs/project.h"
 #include "core/media/audio.h"       // AudioEngine + MediaPlayers (merged)
 #include "core/emote/emote_player.h"
@@ -366,6 +367,10 @@ public:
     bool load_game_from(const std::string& file, int64_t trans_type);
     /// Current logical save path prefix (sanitized from the ini SAVEPATH).
     const std::string& savepath() const;
+    /// Per-game compatibility manifest read at project open
+    /// (core/fs/compat_config.h). Empty when the project ships none; every
+    /// field falls back to today's behaviour.
+    const oa::fs::CompatConfig& compat_config() const;
     /// Whether numbered-save files exist (save slot list checks).
     bool save_file_exists(const std::string& file) const;
     /// Drive one save-domain event directly (tests/hosts; identical path to

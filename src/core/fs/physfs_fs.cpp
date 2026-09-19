@@ -1,5 +1,7 @@
 #include "core/fs/physfs_fs.h"
 
+#include "core/util/path_utf8.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -98,12 +100,6 @@ std::string physfs_error() {
 // std::filesystem/std::fopen calls.
 // ---------------------------------------------------------------------------
 
-/// Interpret UTF-8 path bytes as a native path (Windows: UTF-16).
-sfs::path native_path_from_utf8(std::string_view utf8) {
-    const std::u8string u8(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size());
-    return sfs::path(u8);
-}
-
 /// Open `path` for binary writing: the wide API on Windows (the narrow one
 /// decodes with the ACP), the byte API on POSIX.
 std::FILE* fopen_write_binary(const sfs::path& path) {
@@ -195,7 +191,10 @@ class FileSet {
 public:
     explicit FileSet(std::vector<std::string> paths) {
         for (auto& p : paths) {
-            auto f = std::make_unique<std::ifstream>(p, std::ios::binary);
+            // UTF-8 -> native for the open: libstdc++'s narrow ifstream
+            // decodes with the ACP on Windows and fails on CJK install paths.
+            auto f = std::make_unique<std::ifstream>(
+                oa::util::native_path_from_utf8(p), std::ios::binary);
             if (!*f) throw std::runtime_error("cannot open PFS volume: " + p);
             f->seekg(0, std::ios::end);
             const auto end = f->tellg();
@@ -209,7 +208,8 @@ public:
     /// per-open-file isolation). One FileSet must never serve two streams.
     FileSet(const FileSet& other) : specs_(other.specs_) {
         for (const auto& v : specs_) {
-            auto f = std::make_unique<std::ifstream>(v.path, std::ios::binary);
+            auto f = std::make_unique<std::ifstream>(
+                oa::util::native_path_from_utf8(v.path), std::ios::binary);
             if (!*f) throw std::runtime_error("cannot open PFS volume: " + v.path);
             streams_.push_back(std::move(f));
         }
@@ -613,16 +613,18 @@ std::string fresh_name(const char* suffix) {
 /// contiguous set.
 std::vector<std::string> sibling_volumes(const std::string& base_path) {
     std::vector<std::string> out;
-    const sfs::path base(base_path);
-    const std::string stem = base.filename().string();
-    const std::string dir =
-        base.parent_path().empty() ? "." : base.parent_path().string();
+    // UTF-8 -> native for every filesystem hop (a CJK install directory must
+    // not throw here); the returned volume paths go back to UTF-8 for the
+    // PhysicsFS face below.
+    const sfs::path base = oa::util::native_path_from_utf8(base_path);
+    const std::string stem = oa::util::path_to_utf8(base.filename());
+    const sfs::path dir = base.parent_path().empty() ? sfs::path(L".") : base.parent_path();
     std::vector<uint32_t> nums;
     std::error_code ec;
     sfs::directory_iterator it(dir, ec);
     if (ec) return out;
     for (const auto& de : it) {
-        const std::string fn = de.path().filename().string();
+        const std::string fn = oa::util::path_to_utf8(de.path().filename());
         if (fn.size() != stem.size() + 4) continue;
         if (fn.compare(0, stem.size(), stem) != 0 || fn[stem.size()] != '.') continue;
         const char* s = fn.c_str() + stem.size() + 1;
@@ -635,7 +637,9 @@ std::vector<std::string> sibling_volumes(const std::string& base_path) {
     for (const uint32_t n : nums) {
         char suffix[16];
         std::snprintf(suffix, sizeof(suffix), ".%03u", n);
-        const std::string cand = (sfs::path(dir) / (stem + suffix)).string();
+        const std::string cand =
+            oa::util::path_to_utf8(
+                dir / oa::util::native_path_from_utf8(stem + suffix));
         std::error_code fec;
         if (!sfs::is_regular_file(cand, fec) || fec) continue; // dirs aren't volumes
         out.push_back(cand);
@@ -756,8 +760,8 @@ PfsInfo scan_pfs_file(const std::string& path) {
 
 size_t extract_pfs_archive(const std::string& archive_path, const std::string& dir,
                            const std::function<bool(const PfsEntryInfo&)>& filter) {
-    // `dir` comes from the caller (argv / temp dir): a NATIVE path string, so
-    // it keeps its existing decoding. Only the PFS entries below are UTF-8.
+    // Both sides are UTF-8: `dir` comes from the caller (argv / OA_UI_OUT /
+    // temp dir, all UTF-8 by contract), PFS entries are raw UTF-8 bytes.
     auto mkdirs = [](const sfs::path& path) {
         sfs::path cur;
         for (const auto& part : path) {
@@ -766,7 +770,7 @@ size_t extract_pfs_archive(const std::string& archive_path, const std::string& d
             if (!sfs::exists(cur, ec)) sfs::create_directory(cur, ec);
         }
     };
-    const sfs::path root(dir);
+    const sfs::path root = oa::util::native_path_from_utf8(dir);
     mkdirs(root);
     const PfsInfo info = scan_pfs_file(archive_path);
     PhysFileSystem fs(archive_path, false);
@@ -784,7 +788,7 @@ size_t extract_pfs_archive(const std::string& archive_path, const std::string& d
         const std::string out_label = dir + "/" + rel;
         sfs::path out;
         try {
-            sfs::path entry = native_path_from_utf8(rel);
+            sfs::path entry = oa::util::native_path_from_utf8(rel);
             // Index paths are relative; `root / entry` would DISCARD root for
             // an absolute entry (leading '/', UNC, "C:.."), while the pre-fix
             // string concat always kept the entry below `dir`. Keep that
@@ -941,12 +945,14 @@ PhysFileSystem::PhysFileSystem(std::string source_path, bool sidecar_dir)
     d_->mp = "/" + fresh_name(""); // e.g. /__oa0
     try {
         std::error_code ec;
-        const bool is_dir = sfs::is_directory(source_path, ec) && !ec;
+        const sfs::path source_native = oa::util::native_path_from_utf8(source_path);
+        const bool is_dir = sfs::is_directory(source_native, ec) && !ec;
         if (is_dir) {
             d_->adopt_or_mount_dir(source_path);
             d_->kind = "dir";
         } else {
-            const std::string parent = sfs::path(source_path).parent_path().string();
+            const std::string parent =
+                oa::util::path_to_utf8(source_native.parent_path());
             bool have_sidecar = false;
             if (sidecar_dir && !parent.empty()) {
                 std::error_code sec;
@@ -1150,7 +1156,7 @@ namespace {
 
 bool rel_clean(std::string_view rel) {
     if (rel.empty() || rel.front() == '/' || rel.front() == '\\') return false;
-    const sfs::path relp{std::string(rel)};
+    const sfs::path relp = oa::util::native_path_from_utf8(rel);
     for (const auto& seg : relp) {
         if (seg == "..") return false;
     }

@@ -420,6 +420,14 @@ struct InterpreterHooks {
     /// Absent => noexist default.
     std::function<std::optional<std::array<int64_t, 6>>(const std::string& file)>
         file_mtime;
+    /// Save-area whole-file read (Lua io.open read path, writable root
+    /// first). Absent => the Lua file layer falls back to the asset face.
+    std::function<std::optional<std::vector<uint8_t>>(const std::string& file)>
+        save_read;
+    /// Save-area whole-file write (Lua io.open write path: wb/a/r+ modes).
+    /// Absent => the write reports failure to the script.
+    std::function<bool(const std::string& file, const std::vector<uint8_t>& data)>
+        save_write;
     /// Monotonic per-tick frame number (e:getFrameNumber). Absent => the
     /// lua host falls back to an fps projection of the interpreter clock.
     std::function<uint64_t()> frame_number;
@@ -474,6 +482,7 @@ public:
     /// wait's [return] row).
     void set_call_stack(std::vector<CallFrame> stack) {
         call_stack_ = std::move(stack);
+        restore_completed_queued_barriers();
     }
     /// Temporarily detach / re-queue pending engine tags (used by the save
     /// domain to flush only the tags an onSave/onLoad handler generated).
@@ -487,6 +496,11 @@ public:
     /// drain that Lua e:enqueueTag uses; the runtime enqueues lytween
     /// completion handlers through it).
     void enqueue_tag(std::string tag, std::map<std::string, std::string> params);
+    /// Queue an IMMEDIATE tag (Lua `e:tag{}`): it keeps its position in the
+    /// queue's immediate prefix, so a queued `[call]` barrier leaves it in
+    /// front of the call's own continuation (see QueuedCallBarrier).
+    void enqueue_tag_immediate(std::string tag,
+                               std::map<std::string, std::string> params);
     /// Whether the tag queue holds pending tags.
     bool has_queued_tags() const { return !tag_queue_.empty(); }
     /// First `n` queued tags in FIFO order (diagnostics only).
@@ -569,6 +583,21 @@ private:
     std::map<std::pair<std::string, size_t>, bool> executed_lua_blocks_;
     // queue of engine tags enqueued from Lua (drained before inline steps)
     std::vector<Instruction> tag_queue_;
+    // Length of the queue's IMMEDIATE prefix (e:tag rows); entries past it
+    // are deferred rows (e:enqueueTag / engine events).
+    size_t immediate_tag_count_ = 0;
+    /// A queued `[call]` owns the script stream until its frame returns: rows
+    /// already queued behind it belong to the CALLER's continuation and are
+    /// held here meanwhile. Without this, a Lua batch such as the boot
+    /// framework's `system_init()` (`e:enqueueTag{call, file=system/msg.iet}`
+    /// followed by `e:enqueueTag{jump, label=game_start}`) would drain the
+    /// jump with the CURRENT script already switched to the callee, and the
+    /// label (defined in the caller, system/first.iet) would not resolve.
+    struct QueuedCallBarrier {
+        size_t stack_depth = 0;  // call_stack_.size() right after the push
+        std::vector<Instruction> deferred;
+    };
+    std::vector<QueuedCallBarrier> queued_call_barriers_;
     // Lua-side event handlers: event name -> global function name
     std::map<std::string, std::string> event_handlers_;
     // e:getScriptWaitReason backing store
@@ -589,6 +618,9 @@ private:
     /// interface").
     void load_external_script(const std::string& file);
     std::optional<ExecutionResult> flush_tag_queue();
+    /// Release the deferred continuations of queued calls whose frames have
+    /// returned (FIFO, appended after anything the callee left queued).
+    void restore_completed_queued_barriers();
     /// Sync metric vars read the active layer, but FPM writes them
     /// right after queueing a chgmsg/rp/print segment (uihelp centering,
     /// get_fontsize, line/backlog measuring). Run the queued message-text

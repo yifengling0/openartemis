@@ -12,6 +12,8 @@ Artemis 系 PFS 游戏资源包（`root.pfs`，可带分卷）。本仓库不含
   - `docs/ARCHITECTURE.md` — **整体架构**（分层/数据流/模块职责/平台/构建/测试）
   - `docs/TESTING.md` — `OA_*` 环境变量唯一权威表 + 测试布局与验收流
   - `docs/PLATFORMS.md` — **Android APK / WebAssembly 构建与打包**（含壳层说明）
+  - `docs/ART3M1S_REFERENCE_NOTES.md` — 与 art3m1s/art3m1s-core 的差距调研、兼容性改造记录、
+    每游戏清单 `oa_compat.json` 字段表；`docs/PERFORMANCE_OPTIMIZATION_PLAN.md` 顶部有各阶段状态
   - `docs/HARMONY_NATIVE_HANDOVER.md` — **VintagePomelo 鸿蒙原生车道交接**（编译、vsync、已踩坑、未验证项）
 - 引擎：`src/core`（无窗口依赖）+ `src/app`（SDL3 宿主）
 - 工具：`tools/`（C++ CLI: opfs / psb / asb / oasave + 脚本: pfs.py / mkfixture.py /

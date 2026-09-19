@@ -22,6 +22,7 @@
 // unchanged: ONE guarded engine-handle userdata whose metatable carries the
 // whole e:* method surface, plus the `pluto` global.
 #include "core/runtime/runtime_lua.h"
+#include "core/runtime/runtime_lua_file.h"
 
 #include <cmath>
 #include <cstdint>
@@ -277,6 +278,7 @@ LuaBridge::LuaBridge(LuaHost host) : host_(std::move(host)) {
     if (!L_) throw LuaError("luaL_newstate failed");
     luaL_openlibs(L_);
     apply_stdlib_block_list(L_);
+    install_lua_file_io(L_, this);
 
     install_engine_api();
 }
@@ -690,7 +692,7 @@ int l_tag(lua_State* L) {
         lua_pushliteral(L, "tag queue not wired");
         return lua_error(L);
     }
-    bridge->host().enqueue_tag(std::move(tag), std::move(params));
+    bridge->host().enqueue_tag(std::move(tag), std::move(params), /*immediate=*/true);
     return 0;
 }
 
@@ -712,7 +714,7 @@ int l_enqueue_tag(lua_State* L) {
         lua_pushliteral(L, "tag queue not wired");
         return lua_error(L);
     }
-    bridge->host().enqueue_tag(std::move(tag), std::move(params));
+    bridge->host().enqueue_tag(std::move(tag), std::move(params), /*immediate=*/false);
     return 0;
 }
 
@@ -946,7 +948,8 @@ int l_set_magic_path(lua_State* L) {
 
 int l_exit(lua_State* L) {
     LuaBridge* bridge = bridge_from_state(L);
-    if (bridge->host().enqueue_tag) bridge->host().enqueue_tag("exit", {});
+    if (bridge->host().enqueue_tag)
+        bridge->host().enqueue_tag("exit", {}, /*immediate=*/true);
     return 0;
 }
 
@@ -1368,13 +1371,13 @@ int l_create_emote_layer(lua_State* L) {
     // creates every missing ancestor too), then ask the runtime to decode
     // the first psb file and render the static pose onto that layer.
     if (bridge->host().enqueue_tag) {
-        bridge->host().enqueue_tag("lyc2", {{"id", id}});
+        bridge->host().enqueue_tag("lyc2", {{"id", id}}, /*immediate=*/true);
         std::map<std::string, std::string> p;
         p["id"] = id;
         p["files"] = files;
         if (width > 0) p["width"] = std::to_string(width);
         if (height > 0) p["height"] = std::to_string(height);
-        bridge->host().enqueue_tag("emotestatic", std::move(p));
+        bridge->host().enqueue_tag("emotestatic", std::move(p), /*immediate=*/true);
     }
     lua_push_emote_layer_object(L, bridge, id);
     return 1;

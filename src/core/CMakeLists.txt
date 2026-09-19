@@ -3,13 +3,16 @@ set(OA_CORE_SRC
   version.cpp
   util/sha1.cpp
   util/charset.cpp
+  util/path_utf8.cpp
   fs/project.cpp
+  fs/compat_config.cpp
   fs/physfs_fs.cpp
   util/binary_stream.cpp
   runtime/runtime.cpp
   runtime/runtime_media.cpp
   runtime/runtime_save.cpp
   runtime/runtime_lua.cpp
+  runtime/runtime_lua_file.cpp
   runtime/runtime_iet.cpp
   render/layer.cpp
   render/backend_gles.cpp

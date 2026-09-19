@@ -27,6 +27,8 @@
 //     event watch is registered on init and removed on shutdown.
 #include "platform/Platform.h"
 
+#include "core/util/path_utf8.h"
+
 #include <atomic>
 #include <cstdlib> // getenv/setenv (HOME for PhysicsFS, see init())
 #include <filesystem>
@@ -63,9 +65,9 @@ std::string default_save_root(const std::string& data_path, bool data_is_dir) {
     }
     // SDL storage not available yet (should not happen in a booted shell):
     // fall back to the desktop rule so saves stay next to the data file.
-    std::string save_root = (data_is_dir ? std::filesystem::path(data_path)
-                                         : std::filesystem::path(data_path).parent_path())
-                                .string();
+    const std::filesystem::path native = oa::util::native_path_from_utf8(data_path);
+    std::string save_root =
+        oa::util::path_to_utf8(data_is_dir ? native : native.parent_path());
     if (save_root.empty()) save_root = ".";
     return save_root;
 }

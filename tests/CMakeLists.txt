@@ -27,6 +27,23 @@ add_executable(interpreter_test interpreter_test.cpp)
 target_link_libraries(interpreter_test PRIVATE libopenartemis)
 add_test(NAME interpreter_test COMMAND interpreter_test)
 
+# Queued-call barrier: Lua e:enqueueTag batches (call then jump) must run the
+# callee first and keep the caller's continuation for the return. Regression
+# for the 枫笛 boot stall ("jump: label not found: game_start").
+add_executable(tag_queue_barrier_test tag_queue_barrier_test.cpp)
+target_link_libraries(tag_queue_barrier_test PRIVATE libopenartemis)
+add_test(NAME tag_queue_barrier_test COMMAND tag_queue_barrier_test)
+
+# Lua io.open virtualization onto the save root + host-service stubs.
+add_executable(lua_file_io_test lua_file_io_test.cpp)
+target_link_libraries(lua_file_io_test PRIVATE libopenartemis)
+add_test(NAME lua_file_io_test COMMAND lua_file_io_test)
+
+# Per-game compatibility manifest reader (oa_compat.json / art3m1s.json).
+add_executable(compat_config_test compat_config_test.cpp)
+target_link_libraries(compat_config_test PRIVATE libopenartemis)
+add_test(NAME compat_config_test COMMAND compat_config_test)
+
 add_executable(variable_test variable_test.cpp)
 target_link_libraries(variable_test PRIVATE libopenartemis)
 add_test(NAME variable_test COMMAND variable_test)

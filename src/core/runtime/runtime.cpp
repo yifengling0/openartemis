@@ -209,6 +209,7 @@ LoadResult GameRuntime::load_game(const std::string& file, int64_t trans_type) {
 }
 bool GameRuntime::load_game_from(const std::string& file, int64_t trans_type) { return s_->load_game_from(file, trans_type); }
 const std::string& GameRuntime::savepath() const { return s_->savepath(); }
+const oa::fs::CompatConfig& GameRuntime::compat_config() const { return s_->compat_config(); }
 bool GameRuntime::save_file_exists(const std::string& file) const { return s_->save_file_exists(file); }
 void GameRuntime::apply_save_event(const oa::runtime::Event& e) { s_->apply_save_event(e); }
 bool GameRuntime::apply_media_event(const oa::runtime::Event& e) { return s_->apply_media_event(e); }
@@ -267,10 +268,17 @@ void GameRuntime::RuntimeState::enable_decode_pool(int threads) {
 }
 
 void GameRuntime::RuntimeState::open_project(std::string_view platform) {
-    platform_ = std::string(platform);
-    rt_->project_ = oa::fs::Project::open(*fs_, platform);
+    // Per-game manifest first: it may name the reported OS (system.ini
+    // section + the script-visible `os`); an explicit host/CLI platform wins.
+    compat_ = oa::fs::load_compat_config(*fs_);
+    std::string effective_platform(platform);
+    if (effective_platform.empty() && compat_.has_platform)
+        effective_platform = compat_.platform;
+    platform_ = effective_platform;
+    rt_->project_ = oa::fs::Project::open(*fs_, effective_platform);
     oa::runtime::Interpreter::Config cfg;
     cfg.charset = rt_->project_.config.charset;
+    if (compat_.has_charset) cfg.charset = compat_.charset;
     cfg.platform = rt_->project_.config.platform;
     cfg.stage_width = rt_->project_.config.stage_width;
     cfg.stage_height = rt_->project_.config.stage_height;
@@ -415,6 +423,23 @@ void GameRuntime::RuntimeState::open_project(std::string_view platform) {
         const std::string rel = qualify_save_file(file);
         if (rel.empty() || !save_store_) return std::nullopt;
         return save_store_->modification_time(rel);
+    };
+    // Lua io.open face: the save root is the writable half of the game
+    // namespace (savedata/system.dat in ハミダシ系 boot scripts, temp files
+    // under the savepath, ...). Reads never fall back to the asset side —
+    // the caller layers that itself, so a save-area name cannot silently
+    // resolve to a shipped file.
+    interpreter_->hooks().save_read =
+        [this](const std::string& file) -> std::optional<std::vector<uint8_t>> {
+        const std::string rel = qualify_save_file(file);
+        if (rel.empty() || !save_store_) return std::nullopt;
+        return save_store_->read(rel);
+    };
+    interpreter_->hooks().save_write =
+        [this](const std::string& file, const std::vector<uint8_t>& data) -> bool {
+        const std::string rel = qualify_save_file(file);
+        if (rel.empty() || !save_store_) return false;
+        return save_store_->write(rel, data);
     };
     interpreter_->hooks().sound_info = [this] { return sound_info_snapshot_for_hook(); };
     // e:var system=get_backlog_size/get_backlog_tags/get_message_tags

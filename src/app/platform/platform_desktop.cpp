@@ -20,15 +20,19 @@
 //     path; headless never touches SDL).
 #include "platform/Platform.h"
 
+#include "core/util/path_utf8.h"
+
 #include <filesystem>
 
 namespace oa::plat {
 
 std::string default_save_root(const std::string& data_path, bool data_is_dir) {
     // Game dir = the folder tree itself / the parent of a .pfs archive.
-    std::string save_root = (data_is_dir ? std::filesystem::path(data_path)
-                                         : std::filesystem::path(data_path).parent_path())
-                                .string();
+    // UTF-8 -> native: a game installed under a CJK directory must not throw
+    // in path construction (research/129 "Illegal byte sequence" family).
+    const std::filesystem::path native = oa::util::native_path_from_utf8(data_path);
+    std::string save_root =
+        oa::util::path_to_utf8(data_is_dir ? native : native.parent_path());
     if (save_root.empty()) save_root = ".";
     return save_root;
 }

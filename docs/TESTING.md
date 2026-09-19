@@ -38,7 +38,9 @@ openartemis [options] [project.pfs]     # pfs 或解包目录（含 system.ini�
   compositor/layer_semantics/transform/event_tags/ini/dir_fs/pfs(小样本)/script/
   interpreter/lua*/variable/asb/input_dispatch/render2/text_domain/text_reveal/
   media_state/media_runtime/video_decode/save_domain/save_thumb_readback/
-  p1c2_control/backlog_var_bridge/misc_b 等。
+  p1c2_control/backlog_var_bridge/misc_b 等；兼容性批次新增
+  tag_queue_barrier（排队 call 屏障）/lua_file_io（io.open 存档根虚拟化 + 宿主服务桩）/
+  compat_config（oa_compat.json 解析与优先级）。
 - `tests/fpm/` — **真实游戏回归测试**（判据：需要 `OA_TEST_FPM_PFS`（Madosoft《ハミダシクリエイティブ》中文版）或
   `OA_TEST_NEKOMIKO_PFS`（NekoMiko，U6b）指向真实 Artemis 包 / 只对该游戏
   有效；缺包时自跳 exit 77）：
@@ -109,7 +111,9 @@ openartemis [options] [project.pfs]     # pfs 或解包目录（含 system.ini�
 | `OA_DEBUG_TRANSQ` | Lua e:tag{"trans"} 来源 Lua 栈打印 | src/core/runtime/runtime_iet.cpp | `OA_DEBUG_TRANSQ=1` |
 | `OA_LUA_DEBUG` | Lua 运行/调用诊断（run_code/错误上下文） | src/core/runtime/runtime_lua.cpp | `OA_LUA_DEBUG=1` |
 | `OA_LUA_STRICT` | **引擎→游戏 Lua 的错误策略**（research/130）：默认"记日志后继续"（游戏 Lua 抛错只放弃该次调用，不退出进程 ，见 `LuaBridge::report_dispatch_error`）；`=1` 恢复 130 之前的 fail-fast（错误照旧走 `[app] tick error` + 退出）。排障/回归想抓"nil 崩溃面"时建议显式打开 | src/core/runtime/runtime_lua.cpp | `OA_LUA_STRICT=1 OA_AUTODRIVE=kdemote ./openartemis_test a.pfs` |
-| `OA_LUA_STDLIB` | **标准库屏蔽清单的 A/B 臂**（research/134）：缺省=屏蔽生效 —— `os.date`/`os.clock`/`os.time`/`os.getenv`、`io.open`/`io.close` 及句柄读写保留可用，`os.execute`/`os.system`/`os.exit`/`os.remove`/`os.rename`/`os.setlocale`/`os.tmpname`/`io.popen`/`io.tmpfile`/`io.input`/`io.output`、`dofile`/`loadfile`/`loadstring`/`load`/`package.loadlib` 被移除；`=stock` 交回**未屏蔽**的标准库面 | src/core/runtime/runtime_lua.cpp | `OA_LUA_STDLIB=stock` |
+| `OA_LUA_STDLIB` | **标准库屏蔽清单的 A/B 臂**（research/134 + docs/ART3M1S_REFERENCE_NOTES.md §3.2）：缺省=屏蔽生效 —— `os.date`/`os.clock`/`os.time`/`os.getenv`、`io.open`/`io.close` 及句柄读写保留可用；`os.execute`/`os.system` 返回非零失败码，`os.remove`/`os.rename` 返回 `nil,msg`，`os.tmpname` 返回存档根内沙箱路径，`io.popen`/`io.tmpfile`/`io.input`/`io.output` 返回 `nil`（**都是"存在但拒绝"，不再是缺字段**，否则框架比较返回值时直接中断 boot）；`os.exit`、`dofile`/`loadfile`/`loadstring`/`load`、`package.loadlib` 仍被移除；`=stock` 交回**未屏蔽**的原生标准库面 | src/core/runtime/runtime_lua.cpp、runtime_lua_file.cpp | `OA_LUA_STDLIB=stock` |
+| `OA_LUA_FILE_DEBUG` | Lua `io.open` 解析/落盘轨迹（打开路径、模式、命中存档根还是项目文件系统、写入字节数；也打印被拒绝的宿主服务调用） | src/core/runtime/runtime_lua_file.cpp | `OA_LUA_FILE_DEBUG=1` |
+| `OA_JUMPDBG` | `[jump]/[call]` 标签缺失时打印解析上下文（label / file / 当前脚本:行）——排查"排队标签在错误脚本上解析"这一类 boot 卡死 | src/core/runtime/runtime_iet.cpp | `OA_JUMPDBG=1` |
 | `OA_ANDROID_FULLSCREEN` | **Android 沉浸式全屏开关**（缺省 1=开）：Android 上真正进全屏的只有 `SDL_SetWindowFullscreen`（建窗的 `SDL_WINDOW_FULLSCREEN` flag 在 Android 后端**不生效**，`Android_CreateWindow` 不碰窗口样式）。`=0` 完全不进全屏，用于把"黑屏"问题从全屏这条链上摘出去：`OA_ANDROID_FULLSCREEN=0` 还黑，就与全屏无关 | src/app/main.cpp | `OA_ANDROID_FULLSCREEN=0` |
 | `OA_NO_VSYNC` | 关闭每帧 Lua `onEnterFrame` 事件（无 vsync 的确定性窗口测试用） | src/core/runtime/runtime.cpp | `OA_NO_VSYNC=1` |
 | `OA_TRANSDBG` | [trans] 捕获路径打点：每次捕获打印 GPU 拷贝（旧场景来自离屏 stage target，零 ReadPixels） | src/app/main.cpp、src/core/render/renderer.cpp | `OA_TRANSDBG=1 OA_AUTODRIVE=exit ./openartemis_test a.pfs` |

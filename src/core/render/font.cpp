@@ -282,6 +282,7 @@ FontSystem::~FontSystem()
         if (p.tex && backend_) backend_->destroy_texture(p.tex);
     for (auto& [k, fe] : font_faces)
         if (fe.face) FT_Done_Face(fe.face);
+    if (override_entry_.face) FT_Done_Face(override_entry_.face);
     if (stroker_) FT_Stroker_Done(stroker_);
     if (ft_lib) FT_Done_FreeType(ft_lib);
 }
@@ -391,10 +392,55 @@ FT_Face FontSystem::load_font_face(const std::string& logical)
 
 FT_Face FontSystem::face_for(const oa::render::FontDesc& f)
 {
+    // Compat manifest font override: one face for every script font.
+    if (override_face_) return override_face_;
     const std::string face = f.face();
     FT_Face r = face.empty() ? default_face : load_font_face(face);
     if (!r) r = default_face; // 缺字形回退：脚本字体缺失 → 默认字体
     return r;
+}
+
+bool FontSystem::set_font_override(const std::string& logical_path)
+{
+    if (!ft_lib || logical_path.empty()) return false;
+    std::optional<std::vector<uint8_t>> bytes;
+    std::string resolved = logical_path;
+    for (const std::string& cand :
+         {logical_path, logical_path + ".otf", logical_path + ".ttf"}) {
+        // Magic-path aware, like every other asset lookup: ":font/x" and
+        // patch overrides resolve through the interpreter's table first.
+        const std::string r = rt_ ? rt_->interpreter().resolve_magic_path(cand)
+                                  : cand;
+        if (auto b = fs_->read(r)) {
+            bytes = b;
+            resolved = r;
+            break;
+        }
+        if (auto b = fs_->read(cand)) {
+            bytes = b;
+            resolved = cand;
+            break;
+        }
+    }
+    if (!bytes) {
+        std::fprintf(stderr, "[app] font override not found: %s\n",
+                     logical_path.c_str());
+        return false;
+    }
+    override_entry_.bytes = *bytes;
+    FT_Face face = nullptr;
+    if (FT_New_Memory_Face(ft_lib, override_entry_.bytes.data(),
+                           (FT_Long)override_entry_.bytes.size(), 0, &face) != 0) {
+        std::fprintf(stderr, "[app] font override is not a usable face: %s\n",
+                     resolved.c_str());
+        override_entry_.bytes.clear();
+        return false;
+    }
+    override_entry_.face = face;
+    override_face_ = face;
+    font_override_path_ = resolved;
+    std::printf("[app] font override active: %s\n", resolved.c_str());
+    return true;
 }
 
 uint32_t FontSystem::utf8_next(const std::string& s, size_t& i)

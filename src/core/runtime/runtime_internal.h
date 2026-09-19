@@ -99,6 +99,7 @@
 // 各域 .cpp）需要它们的完整定义：RuntimeState 直接持有 oa::render::Transition，
 // 并按值搬运 std::vector<oa::render::TweenDone>。公开头一律不 include 本头。
 #include "core/render/render_internal.h"
+#include "core/fs/compat_config.h"
 
 namespace oa::runtime {
 
@@ -183,6 +184,9 @@ struct GameRuntime::RuntimeState {
     const std::shared_ptr<oa::runtime::SaveStore>& save_store() const { return save_store_; }
     void set_frame_capture(CaptureFn fn) { capture_fn_ = std::move(fn); }
     const std::string& savepath() const { return savepath_; }
+    /// Per-game compatibility manifest (core/fs/compat_config.h). Read once
+    /// at project open; every field keeps today's behaviour when absent.
+    const oa::fs::CompatConfig& compat_config() const { return compat_; }
     void apply_save_event(const oa::runtime::Event& e) {
         handle_save_tag(e);
     }
@@ -312,6 +316,8 @@ struct GameRuntime::RuntimeState {
     size_t tag_drain_truncations_ = 0;
     // [B] E: open_project 建立的会话配置（[reset] 重启复用）；读档保留
     std::string savepath_ = "save";
+    // [B] E: 每游戏兼容清单（open_project 读取；跨 [reset] 保留读档语义）
+    oa::fs::CompatConfig compat_;
     // [B] H: 宿主注入的存档 Store；读档保留
     std::shared_ptr<oa::runtime::SaveStore> save_store_;
     // [B] L: [autosave allow] 脚本配置；读档保留（无 fixture 证据）

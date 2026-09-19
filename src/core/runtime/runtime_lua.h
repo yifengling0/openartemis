@@ -60,8 +60,15 @@ enum class FilterDecision { Missing, PassThrough, Consume };
 
 struct LuaHost {
     // -- files ----------------------------------------------------------------
+    /// Read one project file through the game virtual filesystem (assets).
     std::function<std::optional<std::vector<uint8_t>>(const std::string&)> read_file;
     std::function<bool(const std::string&)> is_file_exists;
+    /// Read one file from the WRITABLE save root (game-relative path, no
+    /// asset fallback). Absent => nothing was ever written.
+    std::function<std::optional<std::vector<uint8_t>>(const std::string&)> save_read;
+    /// Write one file into the writable save root, creating parent
+    /// directories. Returns false when the write root is unavailable.
+    std::function<bool(const std::string&, const std::vector<uint8_t>&)> save_write;
 
     // -- variables ------------------------------------------------------------
     std::function<const oa::runtime::Value*(const std::string&)> get_var;
@@ -69,7 +76,13 @@ struct LuaHost {
 
     // -- interpreter wiring ---------------------------------------------------
     /// Queue one engine tag (bypasses the tag filter). Filled by Interpreter.
-    std::function<void(std::string tag, std::map<std::string, std::string> params)>
+    /// `immediate` distinguishes Lua `e:tag{}` (runs as part of the current
+    /// invocation: it keeps the queue's immediate prefix, so a queued
+    /// `[call]` does not defer it) from `e:enqueueTag{}` (a deferred row that
+    /// runs after the current invocation). The original engine separates the
+    /// two the same way.
+    std::function<void(std::string tag, std::map<std::string, std::string> params,
+                       bool immediate)>
         enqueue_tag;
     /// Sync e:tag{"var",...} application (never queued).
     std::function<bool(std::map<std::string, std::string> params)> apply_var_tag;

@@ -1,5 +1,7 @@
 #include "platform/Platform.h"
 
+#include "core/util/path_utf8.h"
+
 #include <filesystem>
 #include <string>
 
@@ -11,13 +13,15 @@
 namespace oa::plat {
 
 std::string default_save_root(const std::string& data_path, bool data_is_dir) {
-    std::string save_root = (data_is_dir ? std::filesystem::path(data_path)
-                                         : std::filesystem::path(data_path).parent_path())
-                                .string();
+    // UTF-8 -> native (see core/util/path_utf8.h): the OHOS data path can
+    // carry CJK in the app's sandbox name.
+    const std::filesystem::path native = oa::util::native_path_from_utf8(data_path);
+    std::string save_root =
+        oa::util::path_to_utf8(data_is_dir ? native : native.parent_path());
     if (save_root.empty()) save_root = ".";
-    std::filesystem::path p(save_root);
+    std::filesystem::path p(oa::util::native_path_from_utf8(save_root));
     p /= "savedata";
-    return p.string();
+    return oa::util::path_to_utf8(p);
 }
 
 #ifdef __OHOS__

@@ -76,6 +76,15 @@ public:
 
     FT_Face load_font_face(const std::string& logical);
     FT_Face face_for(const oa::render::FontDesc& f);
+
+    /// Per-game font override (compat manifest `font_override`, the art3m1s
+    /// `fontOverride` field): once set, EVERY script font reference rasterizes
+    /// from this one face, so a 汉化 patch whose script fonts lack the
+    /// translated glyphs still draws (the same contract as the reference
+    /// host's font override). A path that cannot be read/parsed is logged and
+    /// ignored — the normal resolution below stays in charge.
+    bool set_font_override(const std::string& logical_path);
+    const std::string& font_override_path() const { return font_override_path_; }
     // 度量：字形 advance/包围盒/行高（缺字形/缺字体 → 字号占位）
     uint32_t utf8_next(const std::string& s, size_t& i);
     // 颜色解析（RRGGBB / #RRGGBB / Artemis 惯例 "0RRGGBB" 前导零容错）
@@ -154,6 +163,10 @@ private:
     FT_Library ft_lib = nullptr;
     FT_Stroker stroker_ = nullptr; // 连续描边（FT_Stroker_New(ft_lib)）
     std::map<std::string, FaceEntry> font_faces; // 逻辑 face → 已加载字体
+    /// Override face + the logical path it came from ("" = none).
+    FT_Face override_face_ = nullptr;
+    std::string font_override_path_;
+    FaceEntry override_entry_; // keeps the face bytes alive
     std::map<std::string, CachedGlyph> glyph_cache; // key face\tppem\tcp
     std::map<std::string, CachedGlyph> edge_cache;  // key face\tppem\tcp\tw\tenc
 

@@ -40,6 +40,7 @@
 #include "core/media/image.h"
 #include "core/render/renderer.h"
 #include "core/render/layer.h"
+#include "core/util/path_utf8.h"
 #include "core/version.h"
 
 // ---------------------------------------------------------------------------
@@ -260,7 +261,7 @@ int parse_args(int argc, char** argv, Options& o) {
             o.dump_on_end = true;
             std::error_code tec;
             const std::filesystem::path td = std::filesystem::temp_directory_path(tec);
-            o.dump = (td / "oa_frame.ppm").string();
+            o.dump = oa::util::path_to_utf8(td / "oa_frame.ppm");
             if (td.empty()) o.dump = "oa_frame.ppm"; // no temp dir at all -> cwd
         }
     }
@@ -323,12 +324,15 @@ static FILE* crash_trace_file() {
     if (inited) return f;
     inited = true;
 #ifdef _WIN32
-    char mod[MAX_PATH] = {};
-    if (GetModuleFileNameA(nullptr, mod, MAX_PATH)) {
-        const auto p = std::filesystem::path(mod).parent_path() / "oa_last.log";
-        f = std::fopen(p.string().c_str(), "w");
+    wchar_t mod[MAX_PATH] = {};
+    // Wide module path: the exe may live under a CJK directory (the narrow
+    // API answers in the ANSI code page and the narrow CRT open would fail).
+    if (GetModuleFileNameW(nullptr, mod, MAX_PATH)) {
+        const std::filesystem::path p =
+            std::filesystem::path(mod).parent_path() / L"oa_last.log";
+        f = _wfopen(p.c_str(), L"w");
         if (f)
-            std::printf("[app] crash trace: %s\n", p.string().c_str());
+            std::printf("[app] crash trace: %s\n", oa::util::path_to_utf8(p).c_str());
     }
 #endif
     if (!f) f = std::fopen("oa_last.log", "w");
@@ -705,9 +709,9 @@ static void video_demo_end(AppState* state, bool* quit) {
 // final default (game dir on desktop) is the platform layer's answer
 // (oa::plat::default_save_root).
 static std::string host_save_root(const std::string& pfs_path, bool is_dir) {
-    const char* root = std::getenv("OA_SAVE_ROOT");
     std::string save_root;
-    if (root && *root) {
+    const std::string root = oa::util::env_utf8("OA_SAVE_ROOT");
+    if (!root.empty()) {
         save_root = root;
 #if OA_TEST_BUILD
     } else if (std::getenv("OA_AUTODRIVE") != nullptr) {
@@ -716,7 +720,7 @@ static std::string host_save_root(const std::string& pfs_path, bool is_dir) {
         // OA_SAVE_ROOT explicitly anyway).
         std::error_code tec;
         const std::filesystem::path td = std::filesystem::temp_directory_path(tec);
-        save_root = (td / "oa_autodrive_save").string();
+        save_root = oa::util::path_to_utf8(td / "oa_autodrive_save");
         if (td.empty()) save_root = "oa_autodrive_save";
 #endif
     } else {
@@ -743,6 +747,39 @@ static SDL_AppResult app_fail(const char* fmt, ...)
     return SDL_APP_FAILURE;
 }
 
+// Host argv normalization (Windows): the CRT answers argv in the process ANSI
+// code page while every engine path is UTF-8. Convert in place, keeping the
+// converted bytes alive for the process lifetime (argv must stay valid).
+// POSIX already hands out the native bytes: identity.
+static void normalize_host_argv(int argc, char** argv) {
+#ifdef _WIN32
+    static std::vector<std::string> converted;
+    converted.reserve(size_t(argc) + 1);
+    for (int i = 0; i < argc && argv[i]; ++i)
+        converted.push_back(oa::util::host_bytes_to_utf8(argv[i]));
+    for (int i = 0; i < argc && argv[i]; ++i)
+        argv[i] = converted[size_t(i)].data();
+#else
+    (void)argc;
+    (void)argv;
+#endif
+}
+
+// Compat-manifest input gate (core/fs/compat_config.h): a console-style port
+// may need the keyboard/wheel suppressed while mouse/touch still works.
+// Absent config = today's behaviour (everything enabled).
+static bool compat_keyboard_enabled(const AppState* state) {
+    if (!state->rt) return true;
+    const oa::fs::CompatConfig& c = state->rt->compat_config();
+    return !c.has_input_gate || c.gate_keyboard;
+}
+
+static bool compat_wheel_enabled(const AppState* state) {
+    if (!state->rt) return true;
+    const oa::fs::CompatConfig& c = state->rt->compat_config();
+    return !c.has_input_gate || c.gate_wheel;
+}
+
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 {
     // the SDL3 main-callback driver runs event-gated when the
@@ -767,6 +804,12 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     AppState* state = new AppState();
     *appstate = state;
 
+    // Host byte normalization (Windows): the CRT answers argv in the process
+    // ANSI code page, but every engine path string is UTF-8 (research/129).
+    // Re-encode the arguments ONCE here so a CJK install directory works on
+    // every entry point (positional project path, --dump PATH, ...).
+    normalize_host_argv(argc, argv);
+
     const int parsed = parse_args(argc, argv, state->opt);
     if (parsed == 1) return SDL_APP_SUCCESS; // --help printed
     if (parsed == 2) return SDL_APP_FAILURE; // usage error printed
@@ -774,8 +817,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     // $OA_PFS; with neither, fail with usage (windows/android/wasm hosts and
     // CI must always name their data source explicitly).
     if (state->opt.pfs.empty()) {
-        if (const char* e = std::getenv("OA_PFS"); e && *e)
-            state->opt.pfs = e;
+        const std::string env_pfs = oa::util::env_utf8("OA_PFS");
+        if (!env_pfs.empty()) state->opt.pfs = env_pfs;
     }
     if (state->opt.pfs.empty()) {
         print_usage(argv[0]);
@@ -803,7 +846,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     // keep big media outside the pack (snll movie/*.mp4 etc.) resolve like
     // the original engine.
     std::error_code ec;
-    const bool is_dir = std::filesystem::is_directory(pfs_path, ec);
+    const bool is_dir =
+        std::filesystem::is_directory(oa::util::native_path_from_utf8(pfs_path), ec);
     std::shared_ptr<oa::fs::IFileSystem> fs;
     try {
         fs = std::make_shared<oa::fs::PhysFileSystem>(pfs_path);
@@ -813,7 +857,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
             std::printf("[app] pfs project: %s\n", pfs_path.c_str());
         } else {
             const std::string side =
-                std::filesystem::path(pfs_path).parent_path().string();
+                oa::util::path_to_utf8(oa::util::native_path_from_utf8(pfs_path)
+                                           .parent_path());
             std::printf("[app] pfs project: %s (sidecar dir layer: %s, dir "
                         "files take priority)\n",
                         pfs_path.c_str(), side.c_str());
@@ -836,11 +881,14 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         const std::string save_root = host_save_root(pfs_path, is_dir);
         auto store = std::make_shared<oa::runtime::DirSaveStore>(save_root);
         std::error_code sec;
-        std::filesystem::create_directories(std::filesystem::path(save_root), sec);
+        std::filesystem::create_directories(
+            oa::util::native_path_from_utf8(save_root), sec);
         state->rt->set_save_store(store);
         std::printf("[app] save store root: %s (default: game dir; override via "
                     "OA_SAVE_ROOT)\n",
-                    std::filesystem::absolute(save_root).string().c_str());
+                    oa::util::path_to_utf8(std::filesystem::absolute(
+                        oa::util::native_path_from_utf8(save_root)))
+                        .c_str());
     }
     try {
         state->rt->open_project(state->opt.platform);
@@ -867,6 +915,21 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     // needs during boot-time font_init → get_fontdata.
     state->oaRender = std::move(std::make_unique<oa::render::RenderEngine>(
         fs.get(), state->rt.get()));
+
+    // Per-game compat manifest (core/fs/compat_config.h). CLI/env already won
+    // where they apply (--platform, charset stays project data); the manifest
+    // adds the pieces only the project knows: a font override for 汉化 patches
+    // whose script fonts lack the translated glyphs, and an input gate for
+    // console-style keyboard/wheel suppression.
+    {
+        const oa::fs::CompatConfig& compat = state->rt->compat_config();
+        if (compat.has_font_override)
+            state->oaRender->set_font_override(compat.font_override);
+        if (compat.has_input_gate && !compat.gate_keyboard)
+            std::printf("[app] input gate: keyboard suppressed by the manifest\n");
+        if (compat.has_input_gate && !compat.gate_wheel)
+            std::printf("[app] input gate: wheel->key mapping suppressed\n");
+    }
 
     try {
         state->rt->boot_project();
@@ -1104,10 +1167,12 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         } else {
             std::printf("[ad] visible window (OA_AD_VISIBLE)\n");
         }
-        if (const char* out = std::getenv("OA_UI_OUT"); out && *out) {
-            state->ad_out = out;
+        const std::string ui_out = oa::util::env_utf8("OA_UI_OUT");
+        if (!ui_out.empty()) {
+            state->ad_out = ui_out;
             std::error_code ec;
-            std::filesystem::create_directories(out, ec);
+            std::filesystem::create_directories(
+                oa::util::native_path_from_utf8(state->ad_out), ec);
         }
         std::printf("[ad] auto-drive flow=%s out=%s\n", ad, state->ad_out.c_str());
         if (const char* v = std::getenv("OA_R10_ALTER"); v && *v)
@@ -1582,16 +1647,21 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* ev)
     if (ev->type == SDL_EVENT_KEY_DOWN) {
         if (OA_EVENT_KEY(ev) == SDLK_ESCAPE)
             return SDL_APP_SUCCESS;
-        const int vk = sdl_key_to_vk(OA_EVENT_KEY(ev));
-        if (vk > 0 && state->kbd_down.insert(vk).second)
-            state->input.key_down_edges.push_back(vk);
+        if (compat_keyboard_enabled(state)) {
+            const int vk = sdl_key_to_vk(OA_EVENT_KEY(ev));
+            if (vk > 0 && state->kbd_down.insert(vk).second)
+                state->input.key_down_edges.push_back(vk);
+        }
     }
     if (ev->type == SDL_EVENT_KEY_UP) {
-        const int vk = sdl_key_to_vk(OA_EVENT_KEY(ev));
-        if (vk > 0 && state->kbd_down.erase(vk) > 0)
-            state->input.key_up_edges.push_back(vk);
+        if (compat_keyboard_enabled(state)) {
+            const int vk = sdl_key_to_vk(OA_EVENT_KEY(ev));
+            if (vk > 0 && state->kbd_down.erase(vk) > 0)
+                state->input.key_up_edges.push_back(vk);
+        }
     }
     if (ev->type == SDL_EVENT_MOUSE_WHEEL) {
+        if (!compat_wheel_enabled(state)) return SDL_APP_CONTINUE;
         // Artemis maps the mouse wheel onto the HUP/HDW key
         // pair — vk 136 (up) / 137 (down) — the same domain FPM's keyconfig
         // table keys (csv.advkey.def: 136/137 ≡ PageUp/PageDown semantics:
@@ -1721,7 +1791,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // before the per-frame edge computation consumes them.
     if (!state->ad_flow.empty()) ad_pre_tick(state);
 #endif
-    state->input.keys_down = state->kbd_down; // held-key snapshot (Ctrl role-14 etc.)
+    // held-key snapshot (Ctrl role-14 etc.); the manifest input gate drops the
+    // keyboard half while pointer buttons below stay live.
+    if (compat_keyboard_enabled(state)) state->input.keys_down = state->kbd_down;
+    else state->input.keys_down.clear();
     for (const int mk : state->mouse_held) state->input.keys_down.insert(mk);
 #if OA_TEST_BUILD
     // single synthetic probe click two frames after the plateau metric
