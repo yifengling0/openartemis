@@ -35,6 +35,18 @@ enum SDL_AppResult {
     SDL_APP_FAILURE = 2
 };
 
+// SDL3 speaks SDL_WindowID; SDL2's SDL_GetWindowID already answers the same
+// opaque value, it just has no typedef for it.
+typedef Uint32 SDL_WindowID;
+
+// SDL3: SDL_SetWindowSize answers bool (false + SDL_GetError on failure);
+// SDL2: void. The test host checks the result, so wrap instead of dropping it.
+inline bool OA_SDL_SetWindowSize(SDL_Window* window, int w, int h) {
+    SDL_SetWindowSize(window, w, h);
+    return true;
+}
+#define SDL_SetWindowSize OA_SDL_SetWindowSize
+
 #define SDL_EVENT_QUIT SDL_QUIT
 #define SDL_EVENT_KEY_DOWN SDL_KEYDOWN
 #define SDL_EVENT_KEY_UP SDL_KEYUP

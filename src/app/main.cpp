@@ -340,6 +340,12 @@ struct ProfileSnapshot {
     uint64_t decode_ms = 0;
     uint64_t read_bytes = 0;
     uint64_t misses = 0;
+    uint64_t metric_hits = 0;
+    uint64_t metric_misses = 0;
+    uint64_t tick_us = 0;
+    uint64_t script_us = 0;
+    uint64_t content_us = 0;
+    uint64_t other_us = 0;
     Uint64 ms = 0;
 };
 
@@ -363,6 +369,17 @@ static ProfileSnapshot profile_snapshot(const AppState* state) {
         s.decode_ms = as.decode_ms;
         s.read_bytes = as.read_bytes;
         s.misses = as.misses;
+        const oa::render::RenderEngine::FontCacheStats fs =
+            state->oaRender->font_cache_stats();
+        s.metric_hits = fs.metrics_hits;
+        s.metric_misses = fs.metrics_misses;
+    }
+    {
+        const oa::runtime::GameRuntime::TickProfile& tp = state->rt->tick_profile();
+        s.tick_us = tp.script_us + tp.content_us + tp.other_us;
+        s.script_us = tp.script_us;
+        s.content_us = tp.content_us;
+        s.other_us = tp.other_us;
     }
     return s;
 }
@@ -379,7 +396,9 @@ static void profile_report(const AppState* state, const ProfileSnapshot& prev,
     std::printf(
         "[prof] dt=%.1fs frames=%llu fps=%.1f | draws/f=%.1f batches/f=%.1f "
         "binds/f=%.1f | tex=%llu uploads/f=%.1f upMB/s=%.1f | "
-        "decode/f=%.1f decode_ms/f=%.1f readMB/s=%.1f miss=%llu | layers=%zu\n",
+        "decode/f=%.1f decode_ms/f=%.1f readMB/s=%.1f miss=%llu | "
+        "glyphs h/f=%.1f m/f=%.1f | tick/f=%.2fms script=%.2fms content=%.2fms "
+        "other=%.2fms | layers=%zu\n",
         dt_s, (unsigned long long)df, double(df) / dt_s,
         per(cur.draws, prev.draws), per(cur.batches, prev.batches),
         per(cur.binds, prev.binds), (unsigned long long)(cur.textures - prev.textures),
@@ -388,6 +407,12 @@ static void profile_report(const AppState* state, const ProfileSnapshot& prev,
         per(cur.decodes, prev.decodes), per(cur.decode_ms, prev.decode_ms),
         double(cur.read_bytes - prev.read_bytes) / (1024.0 * 1024.0) / dt_s,
         (unsigned long long)(cur.misses - prev.misses),
+        per(cur.metric_hits, prev.metric_hits),
+        per(cur.metric_misses, prev.metric_misses),
+        per(cur.tick_us, prev.tick_us) / 1000.0,
+        per(cur.script_us, prev.script_us) / 1000.0,
+        per(cur.content_us, prev.content_us) / 1000.0,
+        per(cur.other_us, prev.other_us) / 1000.0,
         state->rt ? state->rt->scene().size() : 0);
     std::fflush(stdout);
 }

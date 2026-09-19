@@ -210,6 +210,9 @@ LoadResult GameRuntime::load_game(const std::string& file, int64_t trans_type) {
 bool GameRuntime::load_game_from(const std::string& file, int64_t trans_type) { return s_->load_game_from(file, trans_type); }
 const std::string& GameRuntime::savepath() const { return s_->savepath(); }
 const oa::fs::CompatConfig& GameRuntime::compat_config() const { return s_->compat_config(); }
+const GameRuntime::TickProfile& GameRuntime::tick_profile() const {
+    return s_->tick_profile();
+}
 bool GameRuntime::save_file_exists(const std::string& file) const { return s_->save_file_exists(file); }
 void GameRuntime::apply_save_event(const oa::runtime::Event& e) { s_->apply_save_event(e); }
 bool GameRuntime::apply_media_event(const oa::runtime::Event& e) { return s_->apply_media_event(e); }
@@ -271,6 +274,9 @@ void GameRuntime::RuntimeState::open_project(std::string_view platform) {
     // Per-game manifest first: it may name the reported OS (system.ini
     // section + the script-visible `os`); an explicit host/CLI platform wins.
     compat_ = oa::fs::load_compat_config(*fs_);
+    // P1 profiler switch (OA_PROFILE): the runtime keeps coarse per-tick
+    // phase sums the host prints as deltas.
+    profile_on_ = std::getenv("OA_PROFILE") != nullptr;
     std::string effective_platform(platform);
     if (effective_platform.empty() && compat_.has_platform)
         effective_platform = compat_.platform;
@@ -731,6 +737,10 @@ void GameRuntime::RuntimeState::apply_override(int key, int status) {
 
 void GameRuntime::RuntimeState::tick(uint64_t delta_ms, const FrameInput& in) {
     if (!interpreter_) return;
+    // P1 profiler (§"可测量优先"): coarse per-tick phase cost, OA_PROFILE only.
+    const auto tick_prof_t0 = std::chrono::steady_clock::now();
+    const uint64_t tick_prof_script_before = tick_profile_.script_us;
+    const uint64_t tick_prof_content_before = tick_profile_.content_us;
     ++tick_count_;
     now_ms_ += delta_ms;
     // A captured transition may have reached its duration: auto-clear before
@@ -955,7 +965,20 @@ void GameRuntime::RuntimeState::tick(uint64_t delta_ms, const FrameInput& in) {
     // scene 轨(tween 值写/settle/anime 帧)→ emote(运行时自动时钟)→
     // click-wait 图标 → 媒体帧末(video 状态/EOF→解绑/overlay file)。序列
     // 严格保持 tick 原调用顺序与位置(原五行原位收口),任何重排即行为漂移。
+    const auto content_prof_t0 = std::chrono::steady_clock::now();
     advance_content_planes(delta_ms);
+    if (profile_on_) {
+        const uint64_t total_us = uint64_t(std::chrono::duration_cast<
+            std::chrono::microseconds>(std::chrono::steady_clock::now() - tick_prof_t0)
+            .count());
+        tick_profile_.content_us += uint64_t(std::chrono::duration_cast<
+            std::chrono::microseconds>(std::chrono::steady_clock::now() - content_prof_t0)
+            .count());
+        const uint64_t measured = (tick_profile_.script_us - tick_prof_script_before) +
+                                  (tick_profile_.content_us - tick_prof_content_before);
+        tick_profile_.other_us += total_us > measured ? total_us - measured : 0;
+        ++tick_profile_.ticks;
+    }
 }
 
 void GameRuntime::RuntimeState::arm_stop_wait(std::string id) {
@@ -968,7 +991,13 @@ void GameRuntime::RuntimeState::arm_stop_wait(std::string id) {
 
 void GameRuntime::RuntimeState::run_until_wait() {
     if (!interpreter_) return;
+    const auto prof_t0 = std::chrono::steady_clock::now();
     const oa::runtime::ExecutionResult r = interpreter_->run();
+    if (profile_on_) {
+        tick_profile_.script_us += uint64_t(std::chrono::duration_cast<
+            std::chrono::microseconds>(std::chrono::steady_clock::now() - prof_t0)
+            .count());
+    }
     if (r == oa::runtime::ExecutionResult::Wait) {
         const oa::runtime::Event* ev = interpreter_->last_wait_event();
         // The script parked itself on a real wait: a [lytween sync=1] seen
@@ -1029,7 +1058,13 @@ void GameRuntime::RuntimeState::drain_parked_queue() {
         const std::string* script_before = interpreter_->current_script();
         const size_t line_before = interpreter_->current_line();
         const size_t stack_before = interpreter_->call_stack().size();
+        const auto prof_t0 = std::chrono::steady_clock::now();
         const oa::runtime::ExecutionResult r = interpreter_->run_queued();
+        if (profile_on_) {
+            tick_profile_.script_us += uint64_t(std::chrono::duration_cast<
+                std::chrono::microseconds>(std::chrono::steady_clock::now() - prof_t0)
+                .count());
+        }
         const bool moved = script_before != interpreter_->current_script() ||
                            line_before != interpreter_->current_line() ||
                            stack_before != interpreter_->call_stack().size();

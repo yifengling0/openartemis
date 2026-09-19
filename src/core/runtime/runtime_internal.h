@@ -187,6 +187,12 @@ struct GameRuntime::RuntimeState {
     /// Per-game compatibility manifest (core/fs/compat_config.h). Read once
     /// at project open; every field keeps today's behaviour when absent.
     const oa::fs::CompatConfig& compat_config() const { return compat_; }
+
+    /// Coarse per-tick phase cost (P1 profiler, OA_PROFILE only):
+    /// script = interpreter run/run_queued, content = media/text plane
+    /// advance, other = everything else in tick. Microsecond sums; the host
+    /// prints per-beat deltas.
+    const GameRuntime::TickProfile& tick_profile() const { return tick_profile_; }
     void apply_save_event(const oa::runtime::Event& e) {
         handle_save_tag(e);
     }
@@ -318,6 +324,9 @@ struct GameRuntime::RuntimeState {
     std::string savepath_ = "save";
     // [B] E: 每游戏兼容清单（open_project 读取；跨 [reset] 保留读档语义）
     oa::fs::CompatConfig compat_;
+    // [D] P: P1 profiler（OA_PROFILE）：开关 + 粗粒度分相成本（不参与存档）
+    bool profile_on_ = false;
+    GameRuntime::TickProfile tick_profile_;
     // [B] H: 宿主注入的存档 Store；读档保留
     std::shared_ptr<oa::runtime::SaveStore> save_store_;
     // [B] L: [autosave allow] 脚本配置；读档保留（无 fixture 证据）

@@ -371,6 +371,14 @@ public:
     /// (core/fs/compat_config.h). Empty when the project ships none; every
     /// field falls back to today's behaviour.
     const oa::fs::CompatConfig& compat_config() const;
+    /// Coarse per-tick phase cost (OA_PROFILE): script / content / other.
+    struct TickProfile {
+        uint64_t ticks = 0;
+        uint64_t script_us = 0;
+        uint64_t content_us = 0;
+        uint64_t other_us = 0;
+    };
+    const TickProfile& tick_profile() const;
     /// Whether numbered-save files exist (save slot list checks).
     bool save_file_exists(const std::string& file) const;
     /// Drive one save-domain event directly (tests/hosts; identical path to

@@ -488,12 +488,22 @@ FontSystem::GlyphMeasure FontSystem::measure_glyph(const FontDesc& f, uint32_t c
     }
     const int ppem = raster_ppem(face, size);
     gm.ppem = double(ppem);
+    // Glyph-metric cache: layout (whole page per frame) and draw (per glyph)
+    // both call here, so the FreeType load below is the text scene's hottest
+    // single call. Keyed by (face, ppem, cp) — see GlyphMetricsKey.
+    const GlyphMetricsKey mkey{face, ppem, cp};
+    if (const auto mit = metrics_cache_.find(mkey); mit != metrics_cache_.end()) {
+        ++metrics_hits_;
+        return mit->second;
+    }
+    ++metrics_misses_;
     if (FT_Set_Pixel_Sizes(face, 0, (FT_UInt)ppem) != 0 ||
         FT_Load_Char(face, (FT_ULong)cp, FT_LOAD_DEFAULT) != 0) {
         gm.advance = size;
         gm.ink_w = size;
         gm.ink_h = size;
         gm.ascent = face->size ? double(face->size->metrics.ascender) / 64.0 : size;
+        metrics_cache_[mkey] = gm;
         return gm;
     }
     const double adv = double(face->glyph->advance.x) / 64.0;
@@ -506,6 +516,7 @@ FontSystem::GlyphMeasure FontSystem::measure_glyph(const FontDesc& f, uint32_t c
     // （对应 offset_y = sf.ascent + px_bounds.min.y）。
     gm.offset_x = double(face->glyph->bitmap_left);
     gm.offset_y = gm.ascent - double(face->glyph->bitmap_top);
+    metrics_cache_[mkey] = gm;
     return gm;
 }
 

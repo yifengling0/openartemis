@@ -29,6 +29,8 @@
 | — | Profiler 计数（draw calls / batches / binds / 纹理新建 / 上传字节 / 图片解码次数与耗时 / 读字节）+ `OA_PROFILE` 5 s 差分 | **已完成**（`RenderStats`/`AssetStats` + main.cpp；`tools/real_game_smoke.ps1 -Profile` 落盘基线） |
 | — | 分段计时（逻辑/解释器/文本/合成各自的 ns 桶，x86/OHOS 上按需加） | 未做（当前计数面覆盖渲染/IO；脚本侧用现有 `OA_*` 诊断） |
 | — | 脏区渲染（damage rect + scissor + 局部上传） | 未做（P1，需先做驱动 back-buffer 语义实测） |
+| — | **字形度量缓存**（(face,ppem,cp) → GlyphMeasure；布局每帧重排整页、绘制每字形都调 FreeType） | **已完成**（`FontSystem::GlyphMetricsKey` + `glyphs h/f m/f` 计数） |
+| §1.2 | **intermediate_render 组烘焙的全屏回读**（`glReadPixels` + 整幅 CPU 合成 + 重新上传，gzsq 实测 152–385 MB/s 上传/120 次纹理新建每秒） | **已定位，未做**（下一步：参数为恒等的组走 GPU 预乘混合直通，需用像素基线验证） |
 
 基线采集：
 
@@ -40,6 +42,16 @@
 # 单包窗口线（有像素数据，OHOS 真机同构）：--fps 30 时跑满 5 s 即有 prof 行
 OA_PROFILE=1 ./build_sdl2/src/app/openartemis --fps 30 --frames 200 <game>/root.pfs
 ```
+
+2026-09-19 实测（桌面 GLES 线，`--fps 1000` 去节流）：
+
+| 包 | fps | draws/f | uploads/f | upMB/s | tick/f（script/content/other） |
+|---|---|---|---|---|---|
+| tmny31 | 357 | 0.4 | 0.0 | 8.1 | 0.35ms（0.30/0.02/0.04） |
+| gzsq（111→127 层） | 46–60 | 9–18 | 1.0–2.0 | 152–385 | 0.12–0.43ms（0.00/0.03–0.30/0.08） |
+
+结论：逻辑 tick 不是瓶颈（0.1–0.4 ms/帧）；gzsq 这类含 `intermediate_render` 组与
+E-mote/视频画布的包，成本集中在**每帧整幅纹理上传与组烘焙回读**上。
 
 ---
 

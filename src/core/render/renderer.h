@@ -93,6 +93,15 @@ public:
     };
     const AssetStats& asset_stats() const { return asset_stats_; }
 
+    /// Text-domain counters: glyph-metric cache hits/misses. Layout runs per
+    /// frame and draw per glyph, so hits/frame should track the page size
+    /// while misses/frame collapses to the newly introduced glyphs.
+    struct FontCacheStats {
+        uint64_t metrics_hits = 0;
+        uint64_t metrics_misses = 0;
+    };
+    FontCacheStats font_cache_stats() const;
+
     // Pixel-read canary: read the current render target (the stage offscreen
     // target — always stage-sized and window-size
     // independent) and return its luma.

@@ -770,6 +770,15 @@ const oa::render::RenderStats& RenderEngine::render_stats() const
     return backend_ ? backend_->stats() : kEmpty;
 }
 
+RenderEngine::FontCacheStats RenderEngine::font_cache_stats() const
+{
+    FontCacheStats out;
+    if (!fontSystem) return out;
+    out.metrics_hits = fontSystem->metrics_cache_hits();
+    out.metrics_misses = fontSystem->metrics_cache_misses();
+    return out;
+}
+
 bool RenderEngine::emote_render_parts(const oa::render::TextureKey& key,
                                       const oa::emote::EmoteFile& file,
                                       const std::vector<oa::emote::EmoteDrawPart>& parts,

@@ -159,10 +159,34 @@ public:
     CachedGlyph edge_slot(oa::render::RenderBackend* backend, FT_Face face,
                           double size, uint32_t cp, double width_px);
 
+    /// 度量缓存键：face + 栅格 ppem + 码点。
+    ///
+    /// measure_glyph 每次都要 FT_Set_Pixel_Sizes + FT_Load_Char；布局（每帧
+    /// 重排整页）与绘制（每字形一次）都走它，一页 300 字 ≈ 600+ 次 FreeType
+    /// 调用/帧，是文本场景的最大单人热点（P1 profiler 实测）。
+    /// 度量是 (face, ppem, cp) 的纯函数 → 按三元组缓存；face 指针天然区分
+    /// 换字体/字体覆盖（清单 font_override 走新 face ⇒ 新键）。
+    struct GlyphMetricsKey {
+        FT_Face face = nullptr;
+        int ppem = 0;
+        uint32_t cp = 0;
+        bool operator<(const GlyphMetricsKey& o) const {
+            if (face != o.face) return face < o.face;
+            if (ppem != o.ppem) return ppem < o.ppem;
+            return cp < o.cp;
+        }
+    };
+    /// Profiler counters for the glyph-metric cache.
+    uint64_t metrics_cache_hits() const { return metrics_hits_; }
+    uint64_t metrics_cache_misses() const { return metrics_misses_; }
+
 private:
     FT_Library ft_lib = nullptr;
     FT_Stroker stroker_ = nullptr; // 连续描边（FT_Stroker_New(ft_lib)）
     std::map<std::string, FaceEntry> font_faces; // 逻辑 face → 已加载字体
+    std::map<GlyphMetricsKey, GlyphMeasure> metrics_cache_;
+    uint64_t metrics_hits_ = 0;
+    uint64_t metrics_misses_ = 0;
     /// Override face + the logical path it came from ("" = none).
     FT_Face override_face_ = nullptr;
     std::string font_override_path_;
