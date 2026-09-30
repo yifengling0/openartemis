@@ -4,6 +4,7 @@
 #include "core/render/backend_sdl.h"
 #endif
 #include "core/emote/emote_file.h"
+#include "core/util/trace_sink.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -453,11 +454,16 @@ size_t RenderEngine::draw_node_text(const oa::render::Layer& node,
     size_t drawn = 0;
     const auto it = frame_node_messages_.find(node.id);
     if (it == frame_node_messages_.end()) return 0;
+    // 分相计时：排版 + 字形栅格 + 绘制都发生在 draw_text_layer 里
+    // （无绑定消息的节点在上方查表即返回，不产生文本工作量）。
+    const auto prof_t0 = std::chrono::steady_clock::now();
     for (const std::string& id : it->second) {
         const oa::render::MessageLayer* ml = rt_->text().layer(id);
         if (!ml) continue;
         drawn += fontSystem->draw_text_layer(backend_.get(), *ml, world, opacity);
     }
+    frame_profile_.text_ns += uint64_t(std::chrono::duration_cast<
+        std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t0).count());
     frame_glyphs_ += drawn;
     return drawn;
 }
@@ -853,6 +859,10 @@ size_t RenderEngine::draw_scene(const oa::render::Compositor& sc, double global_
     // tables are compare_ids-sorted, so this pre-order is the flat draw
     // order, scene creation keeps parents before children).
     if (!backend_) return 0;
+    // 分相计时（P1,OA_PROFILE）：scene = 本次调用总时长 − 文本段
+    // （文本唯一绘制点 draw_node_text，见该函数的计时注释）。
+    const auto prof_t0 = std::chrono::steady_clock::now();
+    const uint64_t prof_text_before = frame_profile_.text_ns;
     size_t drawn = 0;
     // resolve the node → drawable-message map ONCE per frame instead
     // of re-scanning every visible content layer at every node. Equivalence:
@@ -890,6 +900,10 @@ size_t RenderEngine::draw_scene(const oa::render::Compositor& sc, double global_
     if (const oa::render::SceneNode* ov = sc.overlay_node()) {
         draw_node(sc, *ov, oa::render::Affine2{}, 1.0f, std::nullopt, &drawn);
     }
+    const uint64_t prof_total = uint64_t(std::chrono::duration_cast<
+        std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t0).count());
+    const uint64_t prof_text = frame_profile_.text_ns - prof_text_before;
+    frame_profile_.scene_ns += prof_total > prof_text ? prof_total - prof_text : 0;
     return drawn;
 }
 
@@ -948,6 +962,13 @@ const oa::media::Image* RenderEngine::resolve_image(const std::string& name)
     decoded[name] = std::move(img);
     std::printf("[app] texture: %s (%dx%d)\n", resolved.c_str(), decoded[name].w,
         decoded[name].h);
+    // M1：资产域（解码成功事件；路径本地诊断用，trace 产物不入库）。
+    if (oa::util::Trace::instance().enabled()) {
+        oa::util::trace_event("asset", "texture", rt_ ? rt_->now_ms() : 0,
+            {{"path", resolved},
+             {"w", std::to_string(decoded[name].w)},
+             {"h", std::to_string(decoded[name].h)}});
+    }
     return &decoded[name];
 }
 
@@ -1737,6 +1758,9 @@ void RenderEngine::progress_transition()
 void RenderEngine::render_end()
 {
     if (!backend_) return;
+    // 分相计时：呈现段（FBO→window 重 blit + SwapWindow）。OHOS 静态帧
+    // 的每循环 re-blit 也走这里，present/f 由此完整。
+    const auto prof_t0 = std::chrono::steady_clock::now();
     if (stage_rt) {
         backend_->set_target(nullptr);
         backend_->clear_clip();
@@ -1748,6 +1772,8 @@ void RenderEngine::render_end()
     }
     backend_->present();
     if (stage_rt) backend_->set_target(stage_rt);
+    frame_profile_.present_ns += uint64_t(std::chrono::duration_cast<
+        std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t0).count());
 }
 
 }

@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 
@@ -184,6 +185,12 @@ private:
     FT_Library ft_lib = nullptr;
     FT_Stroker stroker_ = nullptr; // 连续描边（FT_Stroker_New(ft_lib)）
     std::map<std::string, FaceEntry> font_faces; // 逻辑 face → 已加载字体
+    /// 逻辑 face → 已确认不可加载（读不到 / 不是字体）。负缓存：face_for 在
+    /// 绘制与度量热路径上逐字形调用，失败面必须在首次探测后被记住，否则每个
+    /// 字形每帧都会带着 PhysFS 全局锁重试一遍（§2.1-2 负缓存的同款理由）。
+    std::set<std::string> face_missing_;
+    /// 一次性打印保护：项目自带字体接管默认面时只提示一次。
+    bool adopted_default_logged_ = false;
     std::map<GlyphMetricsKey, GlyphMeasure> metrics_cache_;
     uint64_t metrics_hits_ = 0;
     uint64_t metrics_misses_ = 0;

@@ -40,7 +40,9 @@
 #include "core/media/image.h"
 #include "core/render/renderer.h"
 #include "core/render/layer.h"
+#include "core/render/text.h"  // OA_SCENE_LAYERS 的文本域 dump
 #include "core/util/path_utf8.h"
+#include "core/util/trace_sink.h"
 #include "core/version.h"
 
 // ---------------------------------------------------------------------------
@@ -346,6 +348,10 @@ struct ProfileSnapshot {
     uint64_t script_us = 0;
     uint64_t content_us = 0;
     uint64_t other_us = 0;
+    uint64_t lua_kb = 0;
+    uint64_t scene_us = 0;
+    uint64_t text_us = 0;
+    uint64_t present_us = 0;
     uint64_t group_premul = 0;
     uint64_t group_readback = 0;
     uint64_t asset_textures = 0;
@@ -402,6 +408,13 @@ static ProfileSnapshot profile_snapshot(const AppState* state) {
         s.script_us = tp.script_us;
         s.content_us = tp.content_us;
         s.other_us = tp.other_us;
+        s.lua_kb = tp.lua_kb;
+    }
+    if (state->oaRender) {
+        const oa::render::RenderEngine::FrameProfile& fp = state->oaRender->frame_profile();
+        s.scene_us = fp.scene_ns / 1000;
+        s.text_us = fp.text_ns / 1000;
+        s.present_us = fp.present_ns / 1000;
     }
     return s;
 }
@@ -420,7 +433,8 @@ static void profile_report(const AppState* state, const ProfileSnapshot& prev,
         "binds/f=%.1f | tex=%llu uploads/f=%.1f upMB/s=%.1f | "
         "decode/f=%.1f decode_ms/f=%.1f readMB/s=%.1f miss=%llu | "
         "glyphs h/f=%.1f m/f=%.1f | tick/f=%.2fms script=%.2fms content=%.2fms "
-        "other=%.2fms | groups premul/f=%.2f readback/f=%.2f | "
+        "other=%.2fms luaKB=%llu | rscene=%.2fms rtext=%.2fms present=%.2fms | "
+        "groups premul/f=%.2f readback/f=%.2f | "
         "assets tex=%llu MB=%.1f evict=%llu | "
         "async dec started=%llu done=%llu fail=%llu | layers=%zu\n",
         dt_s, (unsigned long long)df, double(df) / dt_s,
@@ -437,6 +451,10 @@ static void profile_report(const AppState* state, const ProfileSnapshot& prev,
         per(cur.script_us, prev.script_us) / 1000.0,
         per(cur.content_us, prev.content_us) / 1000.0,
         per(cur.other_us, prev.other_us) / 1000.0,
+        (unsigned long long)cur.lua_kb,
+        per(cur.scene_us, prev.scene_us) / 1000.0,
+        per(cur.text_us, prev.text_us) / 1000.0,
+        per(cur.present_us, prev.present_us) / 1000.0,
         per(cur.group_premul, prev.group_premul),
         per(cur.group_readback, prev.group_readback),
         (unsigned long long)cur.asset_textures,
@@ -622,6 +640,230 @@ static void auto_start_pre_tick(AppState* state) {
         ++nav;
         if (std::strcmp(want, "bt_start") == 0) done = true;
     }
+}
+
+// OA_CLICK_ID="id[;id...]"/"@x,y[;...]": hover each named layer's rect center for ~90
+// frames, then click it, moving to the next after a cooldown — the generic
+// form of OA_AUTO_START (which only knows the tmny31 title keys). Deterministic
+// story entry for compatibility triage: pick the ids from OA_SCENE_HANDLERS,
+// then drive a scene headlessly or windowed without a human at the mouse.
+// Ids are matched against the scene's layers in order; an id that never
+// appears keeps the cursor parked (the run continues).
+
+// OA_CLICK_FAST=1 → 快速驱动节奏（回归深驱：开场文件数百点击点）。
+static int click_hover_frames() {
+    static const int v = std::getenv("OA_CLICK_FAST") ? 10 : 90;
+    return v;
+}
+static int click_cooldown_frames() {
+    static const int v = std::getenv("OA_CLICK_FAST") ? 10 : 60;
+    return v;
+}
+static void click_id_pre_tick(AppState* state) {
+    static const char* spec = std::getenv("OA_CLICK_ID");
+    // "@x,y"/"@center" 点不需要渲染器（headless 回归驱动的主形态）；
+    // 图层 id → 矩形需要 layer_world_rect，仅在窗口线可用。
+    if (!spec || !*spec || !state->rt) return;
+    // 列表分隔符是 ';'（不是 ','）——@x,y 坐标里的逗号是坐标语法。
+    static std::vector<std::string> ids = [] {
+        std::vector<std::string> v;
+        std::string cur;
+        for (const char* p = spec; *p; ++p) {
+            if (*p == ';') {
+                if (!cur.empty()) v.push_back(cur);
+                cur.clear();
+            } else {
+                cur.push_back(*p);
+            }
+        }
+        if (!cur.empty()) v.push_back(cur);
+        return v;
+    }();
+    static size_t idx = 0;
+    static int hover_n = 0;
+    static int cooldown = 0;
+    static bool release_click = false;
+    if (release_click) {
+        state->input.left_down = false;
+        release_click = false;
+    }
+    if (idx >= ids.size()) return;
+    if (cooldown > 0) {
+        --cooldown;
+        return;
+    }
+    // OA_CLICK_FAST=1：快速驱动（hover 90→10 帧、cooldown 60→10）。回回归
+    // 深驱用——开场文件动辄几百个点击点，150 帧/点会让 12 万帧才走到立绘。
+    // "@x,y"（或 "@center"）= 固定点反复点击：VN 的推进就是"点任意处"，
+    // 用它把剧情连续推下去（不消耗列表项）。其余项按图层 id 解析。
+    const std::string& want = ids[idx];
+    const bool repeat_point = !want.empty() && want[0] == '@';
+    int cx = -1, cy = -1;
+    if (repeat_point) {
+        if (want == "@center") {
+            cx = state->rt->project_.config.stage_width / 2;
+            cy = state->rt->project_.config.stage_height / 2;
+        } else {
+            int px = 0, py = 0;
+            if (std::sscanf(want.c_str() + 1, "%d,%d", &px, &py) != 2) return;
+            cx = px;
+            cy = py;
+        }
+    } else {
+        const oa::render::Layer* hit = state->rt->scene().find(want);
+        if (!hit) return;  // 目标层还没出现：等
+        if (!state->oaRender) return;  // headless 无矩形计算面：用 @x,y 代替
+        const auto r = state->oaRender->layer_world_rect(*hit);
+        if (!r) return;
+        cx = int((*r)[0] + (*r)[2] / 2);
+        cy = int((*r)[1] + (*r)[3] / 2);
+    }
+    // 抖动 ±1px：引擎的 rollover/rollout 差分只在 pointer_moved 帧跑，
+    // 静止悬停不会触发游戏的 over 链（btn_cursor 依赖它，菜单点击会被
+    // 静默吞掉）。真实鼠标移动自带抖动，合成驱动必须显式模拟。
+    const int jig = (state->frames % 2 == 0) ? 0 : 1;
+    state->input.mouse_x = cx + jig;
+    state->input.mouse_y = cy + jig;
+    ++hover_n;
+    if (hover_n == 1) {
+        std::printf("[app] CLICK_ID hover %s (%d,%d) f=%llu\n", ids[idx].c_str(), cx,
+                    cy, (unsigned long long)state->frames);
+        std::fflush(stdout);
+    }
+    if (hover_n >= click_hover_frames()) {
+        state->input.left_down = true;
+        state->input.left_click_edge = true;
+        release_click = true;
+        std::printf("[app] CLICK_ID click %s (%d,%d) f=%llu\n", ids[idx].c_str(), cx,
+                    cy, (unsigned long long)state->frames);
+        std::fflush(stdout);
+        crash_note(state, "click-id");
+        hover_n = 0;
+        cooldown = click_cooldown_frames();
+        if (!repeat_point) ++idx;  // "@x,y" 原地反复点；图层 id 一次即过
+    }
+}
+
+// OA_SCENE_HANDLERS=1: dump the scene's interactive surface (id / click fn /
+// rollover fn / key / name per clickable layer) whenever the clickable set
+// changes, up to 12 times per run. Compatibility triage for the Harmony lane:
+// a "boots but does not respond to taps" report needs the game's own click
+// keys (`OA_AUTO_START` only knows the tmny31 titles), and a menu that fails
+// to open shows up here as the clickable set never changing. Diagnostics
+// only — no behavior change.
+static void scene_handlers_dump(AppState* state) {
+    static const bool enabled = std::getenv("OA_SCENE_HANDLERS") != nullptr;
+    if (!enabled || !state->rt || state->oaRender == nullptr) return;
+    if (state->frames < 60) return;  // let boot tags settle
+    static std::string last_digest;
+    static int printed = 0;
+    static uint64_t last_frame = 0;
+    if (state->frames < last_frame + 30) return;  // at most ~2 Hz
+    last_frame = state->frames;
+    std::string digest;
+    std::string lines;
+    for (const oa::render::Layer* l : state->rt->scene().draw_order()) {
+        const auto* h = state->rt->scene().find_event_handler(l->id, "click");
+        if (!h) continue;
+        const auto get = [&](const char* k) -> std::string {
+            const auto it = h->params.find(k);
+            return it == h->params.end() ? std::string() : it->second;
+        };
+        std::string fn = get("click");
+        if (fn.empty()) fn = get("function");
+        // Stage-space rect (center = where a click must land); the same
+        // layer_world_rect the auto-drive uses.
+        int rx = -1, ry = -1, rw = 0, rh = 0;
+        if (const auto r = state->oaRender->layer_world_rect(*l)) {
+            rx = int((*r)[0]);
+            ry = int((*r)[1]);
+            rw = int((*r)[2]);
+            rh = int((*r)[3]);
+        }
+        char rect[64];
+        std::snprintf(rect, sizeof(rect), " rect=%d,%d,%dx%d", rx, ry, rw, rh);
+        digest += l->id + "|" + fn + "|" + get("key") + ";";
+        lines += "  id=" + l->id + " click=" + fn + " key=" + get("key") +
+                 " name=" + get("name") + rect + "\n";
+    }
+    if (digest.empty() || digest == last_digest) return;
+    last_digest = digest;
+    if (++printed > 200) return;
+    std::printf("[handlers] f=%llu clickable=%zu (dump %d):\n%s",
+                (unsigned long long)state->frames,
+                state->rt->scene().draw_order().size(), printed, lines.c_str());
+    std::fflush(stdout);
+}
+
+// OA_SCENE_LAYERS=1: dump every layer that carries a `file` (image content):
+// id / file / visible / alpha / stage rect. Compatibility triage for "the
+// character (or a panel) does not show": if the layer is absent the script
+// never created it; if present but visible=0 / alpha=0 / rect empty the draw
+// path is what swallowed it. Same change-gated cadence as the handlers dump.
+static void scene_layers_dump(AppState* state) {
+    static const bool enabled = std::getenv("OA_SCENE_LAYERS") != nullptr;
+    if (!enabled || !state->rt) return;  // headless 也可用（rect 省略）
+    if (state->frames < 60) return;
+    static std::string last_digest;
+    static int printed = 0;
+    static uint64_t last_frame = 0;
+    if (state->frames < last_frame + 30) return;
+    last_frame = state->frames;
+    std::string digest;
+    std::string lines;
+    size_t with_file = 0;
+    for (const oa::render::Layer* l : state->rt->scene().draw_order()) {
+        const auto it = l->props.find("file");
+        if (it == l->props.end() || it->second.empty()) continue;
+        ++with_file;
+        if (with_file > 24) break;  // 长场景只报前若干条
+        int rx = -1, ry = -1, rw = 0, rh = 0;
+        if (state->oaRender) {
+            if (const auto r = state->oaRender->layer_world_rect(*l)) {
+                rx = int((*r)[0]);
+                ry = int((*r)[1]);
+                rw = int((*r)[2]);
+                rh = int((*r)[3]);
+            }
+        }
+        char tail[96];
+        std::snprintf(tail, sizeof(tail), " vis=%d alpha=%.2f rect=%d,%d,%dx%d",
+                      l->visible ? 1 : 0, l->alpha, rx, ry, rw, rh);
+        digest += l->id + "|" + it->second + tail + ";";
+        lines += "  id=" + l->id + " file=" + it->second + tail + "\n";
+    }
+    if (digest.empty() || digest == last_digest) return;
+    last_digest = digest;
+    if (++printed > 200) return;
+    std::printf("[layers] f=%llu with_file=%zu (dump %d):\n%s",
+                (unsigned long long)state->frames, with_file, printed,
+                lines.c_str());
+    std::fflush(stdout);
+
+    // 文本域：每个消息层的完整状态。空对话框排查的第一手证据——
+    // units=0 表示脚本没把文字送进来（文本事件面）；units>0 而 reveal=0
+    // 表示逐字显示没推进；都正常而画面仍空才是排版/字体/绘制面。
+    const auto& text = state->rt->text();
+    for (const auto& [mid, ml] : text.layers()) {
+        size_t units = 0, nonempty = 0;
+        for (const auto& u : ml.page) {
+            if (u.kind != oa::render::PageUnit::Kind::Newline) ++units;
+            if (!u.data.empty()) ++nonempty;
+        }
+        std::printf("[text] f=%llu id=%s units=%zu nonempty=%zu chars=%zu "
+                    "reveal=%llu hidden=%d positioned=%d box=%.0f,%.0f %.0fx%.0f "
+                    "face=%s drawable=%d\n",
+                    (unsigned long long)state->frames, mid.c_str(), units, nonempty,
+                    ml.char_count, (unsigned long long)ml.reveal_index,
+                    ml.text_hidden ? 1 : 0, ml.positioned ? 1 : 0, ml.left, ml.top,
+                    ml.width, ml.height, ml.font.face().c_str(),
+                    state->rt->scene().is_message_layer_drawable(mid, ml.positioned)
+                        ? 1 : 0);
+    }
+    std::printf("[text] f=%llu stack=%zu active=%s\n",
+                (unsigned long long)state->frames, text.layer_stack().size(),
+                text.active_layer_id().c_str());
+    std::fflush(stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,7 +1446,17 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
             if (state->frames >= 200 && !state->video_demo_file.empty())
                 video_demo_start(state);
 #endif
-            const oa::runtime::FrameInput hinput;
+            // OA_CLICK_ID 无头驱动（回归用）：@点工作在 headless；id 点
+            // 需要 renderer（见 click_id_pre_tick 的守卫）。edge 由本循环
+            // 消费后清零，驱动下一帧重新置位。
+            click_id_pre_tick(state);
+            scene_layers_dump(state);  // OA_SCENE_LAYERS（headless：rect 省略）
+            oa::runtime::FrameInput hinput;
+            hinput.mouse_x = state->input.mouse_x;
+            hinput.mouse_y = state->input.mouse_y;
+            hinput.left_down = state->input.left_down;
+            hinput.left_click_edge = state->input.left_click_edge;
+            state->input.left_click_edge = false;
             try {
                 state->rt->tick(16, hinput);
             }
@@ -1239,23 +1491,39 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
                 profile_beat(state);
             }
             if (state->opt.frames_target > 0 && state->frames >= state->opt.frames_target) {
-                // headless end-of-run stats (no pixels, so no luma snapshot)
-                size_t handler_layers = 0;
-                for (const oa::render::Layer* l : state->rt->scene().draw_order())
-                    if (!l->event_handlers.empty()) ++handler_layers;
-                std::printf("[app] headless end frames=%llu layers=%zu layer_ev=%zu "
-                    "text_ev=%zu switch_ev=%zu msg_lines=%zu handlers=%zu wait=%s "
-                    "media_ev=%zu audio_players=%zu bgm=%d se=%zu voice=%zu\n",
-                    (unsigned long long)state->frames, state->rt->scene().size(),
-                    state->rt->scene_layer_events(), state->rt->text_events(),
-                    state->rt->message_switch_events(),
-                    state->rt->text().visible_content_layers().size(), handler_layers,
-                    wait_desc(state->rt->current_wait()).c_str(), state->rt->media_events(),
-                    state->rt->media_players().active_players(),
-                    (int)state->rt->audio().is_bgm_playing(),
-                    state->rt->audio().state().se_channels.size(),
-                    state->rt->audio().state().voice_channels.size());
                 hquit = true;
+            }
+        }
+        // headless 末态摘要：帧数目标达成与 [exit]/[reset] 提前退出两条路
+        // 都要出（synthetic 用例 1 帧就 [exit]，摘要缺席会让回归器误判）。
+        {
+            size_t handler_layers = 0;
+            for (const oa::render::Layer* l : state->rt->scene().draw_order())
+                if (!l->event_handlers.empty()) ++handler_layers;
+            std::printf("[app] headless end frames=%llu layers=%zu layer_ev=%zu "
+                "text_ev=%zu switch_ev=%zu msg_lines=%zu handlers=%zu wait=%s "
+                "media_ev=%zu audio_players=%zu bgm=%d se=%zu voice=%zu\n",
+                (unsigned long long)state->frames, state->rt->scene().size(),
+                state->rt->scene_layer_events(), state->rt->text_events(),
+                state->rt->message_switch_events(),
+                state->rt->text().visible_content_layers().size(), handler_layers,
+                wait_desc(state->rt->current_wait()).c_str(), state->rt->media_events(),
+                state->rt->media_players().active_players(),
+                (int)state->rt->audio().is_bgm_playing(),
+                state->rt->audio().state().se_channels.size(),
+                state->rt->audio().state().voice_channels.size());
+            // M1：host 域摘要事件（regression.py 将来可直接消费 JSONL）。
+            if (oa::util::Trace::instance().enabled()) {
+                oa::util::trace_event("host", "digest", state->rt->now_ms(),
+                    {{"frames", std::to_string(state->frames)},
+                     {"layers", std::to_string(state->rt->scene().size())},
+                     {"layer_ev", std::to_string(state->rt->scene_layer_events())},
+                     {"text_ev", std::to_string(state->rt->text_events())},
+                     {"switch_ev", std::to_string(state->rt->message_switch_events())},
+                     {"msg_lines", std::to_string(state->rt->text().visible_content_layers().size())},
+                     {"handlers", std::to_string(handler_layers)},
+                     {"wait", wait_desc(state->rt->current_wait())},
+                     {"media_ev", std::to_string(state->rt->media_events())}});
             }
         }
         return SDL_APP_SUCCESS;
@@ -1958,6 +2226,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // before the per-frame edge computation consumes them.
     if (!state->ad_flow.empty()) ad_pre_tick(state);
 #endif
+    scene_handlers_dump(state);  // OA_SCENE_HANDLERS diagnostics
+    scene_layers_dump(state);    // OA_SCENE_LAYERS diagnostics
     // held-key snapshot (Ctrl role-14 etc.); the manifest input gate drops the
     // keyboard half while pointer buttons below stay live.
     if (compat_keyboard_enabled(state)) state->input.keys_down = state->kbd_down;
@@ -1976,6 +2246,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     state->input.left_click_edge = state->input.left_down && !state->mouse_left_prev;
     state->mouse_left_prev = state->input.left_down;
     auto_start_pre_tick(state);
+    click_id_pre_tick(state);  // OA_CLICK_ID=<layer id list> deterministic drive
 #if OA_TEST_BUILD
     // rollover/rollout + click + drag dispatch now happen inside
     // rt->tick (runtime-owned). The smoke
@@ -2765,6 +3036,8 @@ void SDL_AppQuit(void* appstate, SDL_AppResult result)
 #ifndef OA_HARMONY_LIB
 int main(int argc, char* argv[]) {
     SDL_SetMainReady();
+    // M1 结构化 trace：OA_TRACE_JSONL=<path> 开启（未设 = 关，零开销）。
+    oa::util::Trace::instance().configure(std::getenv("OA_TRACE_JSONL"));
     void* appstate = nullptr;
     SDL_AppResult r = SDL_AppInit(&appstate, argc, argv);
     if (r != SDL_APP_CONTINUE) {

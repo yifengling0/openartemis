@@ -1,0 +1,6 @@
+*top
+[wait time=1]
+[print data="w1"]
+[wait time=1000]
+[print data="w2"]
+[exit]

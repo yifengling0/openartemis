@@ -118,6 +118,17 @@ public:
         return GroupStats{group_premul_bakes_, group_readback_bakes_};
     }
 
+    /// 渲染侧分段计时（P1 分相计时,OA_PROFILE 差分用）：draw_scene 一次
+    /// 调用的 场景遍历 / 文本绘制 分桶（scene = 总时长 − text，文本唯一
+    /// 绘制点 draw_node_text）+ render_end 的呈现段（FBO→window blit +
+    /// SwapWindow；OHOS 静态帧的 re-blit 也计入）。纳秒累计。
+    struct FrameProfile {
+        uint64_t scene_ns = 0;
+        uint64_t text_ns = 0;
+        uint64_t present_ns = 0;
+    };
+    const FrameProfile& frame_profile() const { return frame_profile_; }
+
     /// Asset-texture cache census (P1 LRU): live asset textures, their GPU
     /// bytes, and how many were evicted so far.
     struct CacheStats {
@@ -538,6 +549,8 @@ private:
     /// those that still paid it (identity vs filtered/masked plans).
     uint64_t group_premul_bakes_ = 0;
     uint64_t group_readback_bakes_ = 0;
+    /// 分相计时累计桶（见 FrameProfile 注释）。
+    FrameProfile frame_profile_;
     // ---- asset-texture LRU (P1, PERFORMANCE_PLAN §2.1-3) --------------
     // Only ASSET-domain textures (decoded project images) are tracked: host
     // frames (video/emote/overlay canvases) are streaming uploads the host

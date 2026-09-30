@@ -1,0 +1,35 @@
+{
+ "run_id": "20260925_072319",
+ "exe": "build_sdl2/src/app/openartemis.exe",
+ "results": [
+  {
+   "id": "fengti",
+   "wall_s": 2.6,
+   "exit": 0,
+   "digest": {
+    "frames": "6000",
+    "layers": "107",
+    "layer_ev": "2507",
+    "text_ev": "69",
+    "switch_ev": "112",
+    "msg_lines": "2",
+    "handlers": "15",
+    "wait": "generic",
+    "media_ev": "155",
+    "audio_players": "1",
+    "bgm": "0",
+    "se": "1",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "BUG-0002-tag-filter-swallows-print": true,
+    "BUG-0001-getscriptstack-stub": true,
+    "BUG-0004-media-extension-probe": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  }
+ ]
+}

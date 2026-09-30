@@ -1,0 +1,7 @@
+*top
+[var name="t.a" data="1"]
+[var name="t.a" data="$t.a + 2"]
+[if estimate="$t.a == 3"]
+[print data="arith ok"]
+[endif]
+[exit]

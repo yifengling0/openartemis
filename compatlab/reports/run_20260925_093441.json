@@ -1,0 +1,169 @@
+{
+ "run_id": "20260925_093441",
+ "exe": "build_sdl2/src/app/openartemis.exe",
+ "results": [
+  {
+   "id": "fengti",
+   "wall_s": 3.8,
+   "exit": 0,
+   "digest": {
+    "frames": "6000",
+    "layers": "107",
+    "layer_ev": "2507",
+    "text_ev": "69",
+    "switch_ev": "112",
+    "msg_lines": "2",
+    "handlers": "15",
+    "wait": "generic",
+    "media_ev": "155",
+    "audio_players": "1",
+    "bgm": "0",
+    "se": "1",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "BUG-0002-tag-filter-swallows-print": true,
+    "BUG-0001-getscriptstack-stub": true,
+    "BUG-0004-media-extension-probe": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "fengti_font",
+   "wall_s": 9.2,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "BUG-0003-font-default-adoption": true
+   },
+   "dump": "F:\\MyProject\\vintage-pomelo\\openartemis\\tools\\compatlab\\..\\..\\compatlab\\reports\\logs_20260925_093441\\fengti_font.ppm",
+   "dump_bytes": 2764816,
+   "pixel_diff_pct": 0.0,
+   "pixel_ok": true,
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "fengti_sprites",
+   "wall_s": 16.9,
+   "exit": 0,
+   "digest": {
+    "frames": "20000",
+    "layers": "103",
+    "layer_ev": "9337",
+    "text_ev": "1233",
+    "switch_ev": "1323",
+    "msg_lines": "3",
+    "handlers": "15",
+    "wait": "generic",
+    "media_ev": "15095",
+    "audio_players": "3",
+    "bgm": "0",
+    "se": "3",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "SPRITE-fg-layer-materialized": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "fengti_sprites_dump",
+   "wall_s": 109.2,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {},
+   "dump": "F:\\MyProject\\vintage-pomelo\\openartemis\\tools\\compatlab\\..\\..\\compatlab\\reports\\logs_20260925_093441\\fengti_sprites_dump.ppm",
+   "dump_bytes": 2764816,
+   "pixel_diff_pct": 0.0,
+   "pixel_ok": true,
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "tmny31",
+   "wall_s": 1.3,
+   "exit": 0,
+   "digest": {
+    "frames": "1200",
+    "layers": "44",
+    "layer_ev": "438",
+    "text_ev": "9",
+    "switch_ev": "31",
+    "msg_lines": "1",
+    "handlers": "10",
+    "wait": "stop",
+    "media_ev": "22",
+    "audio_players": "3",
+    "bgm": "1",
+    "se": "2",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {},
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "gzsq",
+   "wall_s": 0.4,
+   "exit": 0,
+   "digest": {
+    "frames": "1200",
+    "layers": "111",
+    "layer_ev": "274",
+    "text_ev": "0",
+    "switch_ev": "30",
+    "msg_lines": "0",
+    "handlers": "33",
+    "wait": "timed",
+    "media_ev": "14",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {},
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "jianyu",
+   "wall_s": 1.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1200",
+    "layers": "25",
+    "layer_ev": "57",
+    "text_ev": "0",
+    "switch_ev": "16",
+    "msg_lines": "0",
+    "handlers": "6",
+    "wait": "stop",
+    "media_ev": "14",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {},
+   "ok": true,
+   "verdict": "PASS"
+  }
+ ]
+}

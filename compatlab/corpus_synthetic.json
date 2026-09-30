@@ -1,0 +1,336 @@
+{
+ "_comment": "M5 合成用例（目录工程，无游戏资产）",
+ "games": [
+  {
+   "id": "syn_boot_min",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/boot_min",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "exit"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_exit_executed",
+     "kind": "min_count",
+     "needle": "[exit]",
+     "n": 1
+    }
+   ],
+   "_comment": "空脚本直达 [exit]：启动/退出闭环"
+  },
+  {
+   "id": "syn_var_arith",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/var_arith",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "var,if,print"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_var_executed",
+     "kind": "min_count",
+     "needle": "[var]",
+     "n": 1
+    },
+    {
+     "name": "tag_if_executed",
+     "kind": "min_count",
+     "needle": "[if]",
+     "n": 1
+    },
+    {
+     "name": "tag_print_executed",
+     "kind": "min_count",
+     "needle": "[print]",
+     "n": 1
+    }
+   ],
+   "_comment": "表达式契约：data/estimate 需 $ 前缀才求值（裸名=字面量）；1+2==3 才走 else"
+  },
+  {
+   "id": "syn_text_basic",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/text_basic",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "chgmsg,print,rt,rp"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_chgmsg_executed",
+     "kind": "min_count",
+     "needle": "[chgmsg]",
+     "n": 1
+    },
+    {
+     "name": "tag_print_executed",
+     "kind": "min_count",
+     "needle": "[print]",
+     "n": 1
+    },
+    {
+     "name": "tag_rt_executed",
+     "kind": "min_count",
+     "needle": "[rt]",
+     "n": 1
+    },
+    {
+     "name": "tag_rp_executed",
+     "kind": "min_count",
+     "needle": "[rp]",
+     "n": 1
+    }
+   ],
+   "_comment": "chgmsg/print/rt/rp 文本面流水线"
+  },
+  {
+   "id": "syn_trans_clear",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/trans_clear",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "trans,flip"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_trans_executed",
+     "kind": "min_count",
+     "needle": "[trans]",
+     "n": 1
+    },
+    {
+     "name": "tag_flip_executed",
+     "kind": "min_count",
+     "needle": "[flip]",
+     "n": 1
+    }
+   ],
+   "_comment": "trans type=0（整场清除）+ flip 边界"
+  },
+  {
+   "id": "syn_wait_time",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/wait_time",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "wait,print"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_wait_executed",
+     "kind": "min_count",
+     "needle": "[wait]",
+     "n": 1
+    },
+    {
+     "name": "tag_print_executed",
+     "kind": "min_count",
+     "needle": "[print]",
+     "n": 1
+    }
+   ],
+   "_comment": "定时等待边界（1ms / 1000ms，时钟推进后继续）"
+  },
+  {
+   "id": "syn_jump_call_return",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/jump_call_return",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "call,return"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_call_executed",
+     "kind": "min_count",
+     "needle": "[call]",
+     "n": 1
+    },
+    {
+     "name": "tag_return_executed",
+     "kind": "min_count",
+     "needle": "[return]",
+     "n": 1
+    }
+   ],
+   "_comment": "call/return 调用栈（call 目标=另一文件，真实游戏形态）"
+  },
+  {
+   "id": "syn_call_self",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/call_self",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "call"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_call_executed",
+     "kind": "min_count",
+     "needle": "[call]",
+     "n": 1
+    }
+   ],
+   "_comment": "call 指向当前脚本自身——已知怪癖探针：return 会落到被调侧导致双 return/Completed，不达 [exit]（engine 怪癖候选，待对照参考实现）"
+  },
+  {
+   "id": "syn_loop_bound",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/loop_bound",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "loop,var,print"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_loop_executed",
+     "kind": "min_count",
+     "needle": "[loop]",
+     "n": 1
+    },
+    {
+     "name": "tag_var_executed",
+     "kind": "min_count",
+     "needle": "[var]",
+     "n": 1
+    },
+    {
+     "name": "tag_print_executed",
+     "kind": "min_count",
+     "needle": "[print]",
+     "n": 1
+    }
+   ],
+   "_comment": "[loop estimate=]…[/loop] 有界循环（计数到 5）"
+  },
+  {
+   "id": "syn_lua_block",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/lua_block",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "calllua"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_calllua_executed",
+     "kind": "min_count",
+     "needle": "[calllua]",
+     "n": 1
+    },
+    {
+     "name": "calllua_dispatched",
+     "kind": "min_count",
+     "needle": "[calllua] ",
+     "n": 1
+    }
+   ],
+   "_comment": "[lua] 块（load 时执行）+ e:tag 写变量回传"
+  },
+  {
+   "id": "syn_chgmsg_two",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/chgmsg_two",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "chgmsg,print"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_chgmsg_executed",
+     "kind": "min_count",
+     "needle": "[chgmsg]",
+     "n": 1
+    },
+    {
+     "name": "tag_print_executed",
+     "kind": "min_count",
+     "needle": "[print]",
+     "n": 1
+    }
+   ],
+   "_comment": "双消息层切换（s.current_message_layer 维护面）"
+  },
+  {
+   "id": "syn_ruby_inline",
+   "path": "F:/MyProject/vintage-pomelo/openartemis/compatlab/synthetic/ruby_inline",
+   "frames": 600,
+   "timeout_s": 60,
+   "env": {
+    "OA_TAG_TRACE": "ruby,print"
+   },
+   "asserts": [
+    {
+     "name": "clean_exit",
+     "kind": "contains",
+     "needle": "[app] bye"
+    },
+    {
+     "name": "tag_ruby_executed",
+     "kind": "min_count",
+     "needle": "[ruby]",
+     "n": 1
+    },
+    {
+     "name": "tag_print_executed",
+     "kind": "min_count",
+     "needle": "[print]",
+     "n": 1
+    }
+   ],
+   "_comment": "ruby/字体栈标签不炸文本管线"
+  }
+ ]
+}

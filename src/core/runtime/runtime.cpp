@@ -2,11 +2,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
+#include <set>
+#include <string>
 
 #include "core/fs/project.h"
-#include "core/render/content_role.h" // bound_image_size 键公式收敛
+#include "core/render/content_role.h"
+#include "core/util/trace_sink.h" // bound_image_size 键公式收敛
 
 namespace oa::runtime {
 
@@ -381,18 +386,50 @@ void GameRuntime::RuntimeState::open_project(std::string_view platform) {
     };
     // The decode host reads media assets through the same resolution:
     // the interpreter's magic-path table first, then the project filesystem.
-    media_players_->set_loader([this](const std::string& logical)
-                                   -> std::optional<std::vector<uint8_t>> {
+    // Extension probing: 脚本给的媒体名常常不带扩展名——artemis 系的 BGM/SE 走
+    // `[seplay file=bgm/bgm_0401_a]`（csv 表里就是不带后缀的基名），包里实际是
+    // .ogg。参考引擎按候选扩展名解析；引擎此前只有精确读取，于是**音乐静默不播**
+    // （读不到 → VorbisSource::open(nullptr) → 通道直接放弃）。图像面早有
+    // .png/.jpg 探测（resolve_image），音频面缺同款。精确命中优先，只有未命中才探。
+    // Extension probing: 脚本给的媒体名常常不带扩展名——artemis 系的 BGM/SE 走
+    // `[seplay file=bgm/bgm_0401_a]`（csv 表里就是不带后缀的基名），包里实际是
+    // .ogg。参考引擎按候选扩展名解析；引擎此前只有精确读取，于是**音乐静默不
+    // 播**（读不到 → VorbisSource::open(nullptr) → 通道直接放弃）。图像面早有
+    // .png/.jpg 探测（resolve_image），音频/视频面缺同款。精确命中优先，未命中
+    // 才按候选扩展名探测；全失败打一行（缺失此前完全静默，"没有音乐"只能靠听）。
+    auto media_probe = [this](const std::string& logical,
+                              std::initializer_list<const char*> exts,
+                              const char* kind)
+                           -> std::optional<std::vector<uint8_t>> {
         if (!interpreter_) return std::nullopt;
-        return fs_->read(interpreter_->resolve_magic_path(logical));
-    });
+        const std::string r = interpreter_->resolve_magic_path(logical);
+        if (auto b = fs_->read(r)) return b;
+        for (const char* ext : exts) {
+            if (auto b = fs_->read(r + ext)) return b;
+        }
+        static std::set<std::string> logged;  // 每个名字一行，不刷屏
+        const std::string key = std::string(kind) + ":" + r;
+        if (logged.insert(key).second) {
+            std::fprintf(stderr, "[app] %s not found: %s\n", kind, r.c_str());
+            if (oa::util::Trace::instance().enabled())
+                oa::util::trace_event("asset", "not_found", now_ms(),
+                    {{"kind", kind}, {"path", r}});
+        }
+        return std::nullopt;
+    };
+    media_players_->set_loader(
+        [media_probe](const std::string& logical)
+            -> std::optional<std::vector<uint8_t>> {
+            return media_probe(logical, {".ogg", ".mp3", ".wav", ".m4a", ".opus", ".flac"},
+                               "media");
+        });
     // The video decoder reads whole asset files through the same face.
     // A missing/undecodable file keeps the logical immediate-finish fallback
     // inside VideoEngine, so project flows never hang on unavailable video.
-    video_.set_loader([this](const std::string& logical)
+    video_.set_loader([media_probe](const std::string& logical)
                           -> std::optional<std::vector<uint8_t>> {
-        if (!interpreter_) return std::nullopt;
-        return fs_->read(interpreter_->resolve_magic_path(logical));
+        return media_probe(logical, {".mp4", ".webm", ".ogv", ".avi", ".mov", ".mkv"},
+                           "video");
     });
     // Save-area aware asset hooks — the runtime serves both the
     // project filesystem (assets) and the save store (files under the logical
@@ -977,6 +1014,9 @@ void GameRuntime::RuntimeState::tick(uint64_t delta_ms, const FrameInput& in) {
         const uint64_t measured = (tick_profile_.script_us - tick_prof_script_before) +
                                   (tick_profile_.content_us - tick_prof_content_before);
         tick_profile_.other_us += total_us > measured ? total_us - measured : 0;
+        // §3.1-2 实测面：GC 调优 A/B 时看常驻增长速率（GCCOUNT 只读
+        // totalbytes，无副作用）。
+        tick_profile_.lua_kb = interpreter_->lua_bridge().gc_heap_kb();
         ++tick_profile_.ticks;
     }
 }
@@ -1224,7 +1264,39 @@ bool GameRuntime::RuntimeState::apply_text_event(const oa::runtime::Event& e) {
     switch (e.kind) {
         case K::ScenarioLine: {
             ++text_events_;
+            // M1：正文入域事件（只记字数，不记内容——资产红线）。
+            if (oa::util::Trace::instance().enabled()) {
+                oa::util::trace_event("text", "push", now_ms(),
+                    {{"layer", text_.active_layer_id()},
+                     {"chars", std::to_string(e.content.size())}});
+            }
             text_.push_text(e.content);
+            // OA_TEXT_IN_TRACE=1：文本入域跟踪（"对话框没字"排查的落点面）。
+            // 剧本 → [print] → 本函数的链路里，这一行能区分"文字没送到文本域"
+            // 与"送到了但落在不出字的层"。限流 300 条。
+            if (std::getenv("OA_TEXT_IN_TRACE")) {
+                static int traced = 0;
+                if (traced++ < 300) {
+                    const std::string active = text_.active_layer_id();
+                    const oa::render::MessageLayer* al = text_.layer(active);
+                    size_t units = 0;
+                    if (al)
+                        for (const auto& u : al->page)
+                            if (u.kind != oa::render::PageUnit::Kind::Newline &&
+                                !u.data.empty())
+                                ++units;
+                    std::printf("[textin] #%d layer=%s units=%zu chars=%zu rev=%llu "
+                                "hidden=%d drawable=%d text=%.40s\n",
+                                traced, active.c_str(), units,
+                                al ? al->char_count : 0,
+                                (unsigned long long)(al ? al->reveal_index : 0),
+                                al && al->text_hidden ? 1 : 0,
+                                al && scene_.is_message_layer_drawable(active, al->positioned)
+                                    ? 1 : 0,
+                                e.content.c_str());
+                    std::fflush(stdout);
+                }
+            }
             // every drawable message layer owns a scene node — content
             // pushed before any chgmsg (default/active layer) materializes it
             // lazily, so glyphs have exactly one paint point (their node's
@@ -1269,6 +1341,13 @@ bool GameRuntime::RuntimeState::apply_text_event(const oa::runtime::Event& e) {
             scene_.set_message_layer_binding(active, scene_id);
             scene_.revive_message_layer(active);
             scene_.set_default_message_layer(active);
+            // s.current_message_layer = 当前 chgmsg 的 id。游戏框架据此判定
+            // "是否处于消息模式"（枫笛 getMessageMode() → tags.print/rt/name
+            // 的接管与否），缺失时 e:var 回 "0" ⇒ 框架判定非消息模式、把文字
+            // 处理整个让开。参考引擎把它作为系统变量暴露（chgmsg 的当前层）。
+            if (interpreter_)
+                interpreter_->set_variable("s.current_message_layer",
+                                          oa::runtime::Value::make_string(active));
             return true;
         }
         case K::MessageLayerPop: {
@@ -1283,6 +1362,10 @@ bool GameRuntime::RuntimeState::apply_text_event(const oa::runtime::Event& e) {
                 scene_.revive_message_layer(active);
             }
             scene_.set_default_message_layer(active);
+            // 弹栈后同样维护 s.current_message_layer（见 MessageLayerSwitch）。
+            if (interpreter_)
+                interpreter_->set_variable("s.current_message_layer",
+                                          oa::runtime::Value::make_string(active));
             return true;
         }
         case K::TextConfig: {

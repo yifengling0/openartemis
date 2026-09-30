@@ -1,0 +1,7 @@
+*top
+[var name="t.i" data="0"]
+[loop estimate="$t.i < 5"]
+[var name="t.i" data="$t.i + 1"]
+[/loop]
+[print data="loop done"]
+[exit]

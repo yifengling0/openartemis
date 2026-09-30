@@ -1,0 +1,10 @@
+*top
+[var name="t.i" data="0"]
+
+*loop_head
+[var name="t.i" data="$t.i + 1"]
+[if estimate="$t.i < 5"]
+[jump file="system/first.iet" label="loop_head"]
+[endif]
+[print data="loop done"]
+[exit]

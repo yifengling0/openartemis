@@ -1,0 +1,4 @@
+*top
+[call file="system/sub.iet" label="sub"]
+[print data="back in top"]
+[exit]

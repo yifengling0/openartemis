@@ -1,0 +1,82 @@
+{
+  "_comment": "Compatibility Lab 本地语料（TASK-008/009/M9）。路径是本机游戏库；asserts 是 Bug Museum 回归断言——每个历史修复必须在这里留一个永久用例（plan §1/§21 L1）。",
+  "games": [
+    {
+      "id": "fengti",
+      "path": "D:/Games/Pomelo/Ar_枫笛_脏翅膀_od/root.pfs",
+      "frames": 6000,
+      "click_ids": "@640,340;@center",
+      "timeout_s": 300,
+      "_comment": "原 ASB 命令系作品。驱动：点标题开始按钮位置，然后连点推进剧情。",
+      "env": { "OA_TEXT_IN_TRACE": "1" },
+      "asserts": [
+        { "name": "BUG-0002-tag-filter-swallows-print", "kind": "min_count", "needle": "layer=adv units=", "n": 5,
+          "_why": "tags.print 返回假值曾把引擎原生 [print] 吞掉（is_builtin_tag 缺登记）+ s.current_message_layer 缺失 → 对话框全空。修复后剧情文字必须入 adv 层。" },
+        { "name": "BUG-0001-getscriptstack-stub", "kind": "not_contains", "needle": "setonpush_call error",
+          "_why": "e:getScriptStack 曾是返回空表的存根 → artemis.lua ReturnStack 索引 nil → setonpush 链断 → 菜单不可点。" },
+        { "name": "BUG-0004-media-extension-probe", "kind": "not_contains", "needle": "media not found: bgm/",
+          "_why": "媒体加载曾无扩展名探测（bgm_0401_a → bgm_0401_a.ogg），BGM 静默不播。" }
+      ]
+    },
+    {
+      "id": "fengti_font",
+      "path": "D:/Games/Pomelo/Ar_枫笛_脏翅膀_od/root.pfs",
+      "mode": "windowed_dump",
+      "frames": 500,
+      "timeout_s": 240,
+      "_comment": "渲染面回归：字体加载发生在绘制路径，headless 看不到。窗口线短跑 + 终帧 PPM。",
+      "asserts": [
+        { "name": "BUG-0003-font-default-adoption", "kind": "min_count", "needle": "default face adopted from script font", "n": 1,
+          "_why": "draw_text_layer 的全局提前返回曾在默认字体解析失败时让整个作品一个字都不画；现在项目字体（image/font/）接管默认面。终帧 PPM 必须非空。" }
+      ]
+    },
+    {
+      "id": "fengti_sprites",
+      "path": "D:/Games/Pomelo/Ar_枫笛_脏翅膀_od/root.pfs",
+      "frames": 20000,
+      "click_ids": "@640,340;@center",
+      "timeout_s": 420,
+      "_comment": "立绘回归（fast 深驱）：开场 536 个点击点后 TatiFa 链路建立 image/fg 立绘图层。运行时面断言；渲染面由 fengti_sprites_dump 看护。",
+      "env": { "OA_SCENE_LAYERS": "1", "OA_CLICK_FAST": "1" },
+      "asserts": [
+        { "name": "SPRITE-fg-layer-materialized", "kind": "min_count", "needle": "file=image/fg/", "n": 1,
+          "_why": "TatiFa → set_stand → [lyc] 链路必须建立可见立绘图层（曾疑似立绘缺失，实测 runtime 侧正常，渲染面另有窗口线看护）。" }
+      ]
+    },
+    {
+      "id": "fengti_sprites_dump",
+      "path": "D:/Games/Pomelo/Ar_枫笛_脏翅膀_od/root.pfs",
+      "mode": "windowed_dump",
+      "frames": 6500,
+      "click_ids": "@640,340;@center",
+      "timeout_s": 300,
+      "_comment": "立绘渲染面回归：窗口线 fast 深驱 6500 帧（越过开场 Tati@143clicks），终帧 PPM 应含立绘（像素基线比对 M7）。",
+      "env": { "OA_CLICK_FAST": "1" },
+      "asserts": []
+    },
+    {
+      "id": "tmny31",
+      "path": "D:/Games/Pomelo/tmny31/root.pfs",
+      "frames": 1200,
+      "timeout_s": 240,
+      "_comment": "FPM 系基准包（引擎标签直用）。boot 冒烟 + 干净退出。",
+      "asserts": []
+    },
+    {
+      "id": "gzsq",
+      "path": "D:/Games/Pomelo/gzsq/root.pfs",
+      "frames": 1200,
+      "timeout_s": 240,
+      "_comment": "重渲染包（intermediate_render 组）。boot 冒烟。",
+      "asserts": []
+    },
+    {
+      "id": "jianyu",
+      "path": "D:/Games/Pomelo/jianyu/root.pfs",
+      "frames": 1200,
+      "timeout_s": 240,
+      "_comment": "曾经 heap-smash 的包（Theora 紧缓冲修复的回归看护）。boot 冒烟。",
+      "asserts": []
+    }
+  ]
+}

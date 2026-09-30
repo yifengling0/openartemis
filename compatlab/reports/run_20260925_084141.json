@@ -1,0 +1,334 @@
+{
+ "run_id": "20260925_084141",
+ "exe": "build_sdl2/src/app/openartemis.exe",
+ "results": [
+  {
+   "id": "syn_boot_min",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "0",
+    "layer_ev": "0",
+    "text_ev": "0",
+    "switch_ev": "0",
+    "msg_lines": "0",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_exit_executed": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "syn_var_arith",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "1",
+    "layer_ev": "0",
+    "text_ev": "1",
+    "switch_ev": "0",
+    "msg_lines": "1",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_var_executed": true,
+    "tag_if_executed": true,
+    "tag_print_executed": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "syn_text_basic",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "1",
+    "layer_ev": "0",
+    "text_ev": "3",
+    "switch_ev": "1",
+    "msg_lines": "1",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_chgmsg_executed": true,
+    "tag_print_executed": true,
+    "tag_rt_executed": true,
+    "tag_rp_executed": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "syn_trans_clear",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "1",
+    "layer_ev": "0",
+    "text_ev": "2",
+    "switch_ev": "0",
+    "msg_lines": "1",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_trans_executed": true,
+    "tag_flip_executed": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "syn_wait_time",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "67",
+    "layers": "1",
+    "layer_ev": "0",
+    "text_ev": "2",
+    "switch_ev": "0",
+    "msg_lines": "1",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_wait_executed": true,
+    "tag_print_executed": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "syn_jump_call_return",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "1",
+    "layer_ev": "0",
+    "text_ev": "2",
+    "switch_ev": "0",
+    "msg_lines": "1",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_call_executed": true,
+    "tag_return_executed": false
+   },
+   "ok": false,
+   "verdict": "PASS(DRIFT)",
+   "digest_drift": {
+    "text_ev": [
+     "3",
+     "2"
+    ]
+   }
+  },
+  {
+   "id": "syn_call_self",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "1",
+    "layer_ev": "0",
+    "text_ev": "3",
+    "switch_ev": "0",
+    "msg_lines": "1",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_call_executed": true,
+    "tag_return_executed": false
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_loop_bound",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "1",
+    "layer_ev": "0",
+    "text_ev": "1",
+    "switch_ev": "0",
+    "msg_lines": "1",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_loop_executed": true,
+    "tag_var_executed": true,
+    "tag_print_executed": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "syn_lua_block",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "1",
+    "layer_ev": "0",
+    "text_ev": "1",
+    "switch_ev": "0",
+    "msg_lines": "1",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_calllua_executed": true,
+    "calllua_dispatched": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "syn_chgmsg_two",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "2",
+    "layer_ev": "0",
+    "text_ev": "2",
+    "switch_ev": "2",
+    "msg_lines": "2",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_chgmsg_executed": true,
+    "tag_print_executed": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  },
+  {
+   "id": "syn_ruby_inline",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": {
+    "frames": "1",
+    "layers": "1",
+    "layer_ev": "0",
+    "text_ev": "1",
+    "switch_ev": "1",
+    "msg_lines": "1",
+    "handlers": "0",
+    "wait": "none",
+    "media_ev": "0",
+    "audio_players": "0",
+    "bgm": "0",
+    "se": "0",
+    "voice": "0"
+   },
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "tag_ruby_executed": true,
+    "tag_print_executed": true
+   },
+   "ok": true,
+   "verdict": "PASS"
+  }
+ ]
+}

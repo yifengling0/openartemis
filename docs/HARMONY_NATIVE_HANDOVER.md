@@ -244,10 +244,28 @@ jianyu 开始游戏 heap smash：Theora 紧缓冲。处理：Ogg/Theora 优先�
    看 `onEnterFrame` / `em:progress` 是 elapsed 时间还是“每 vsync +1 帧”。若 2 倍速，优先改 Lua 桥换算，而不是再叠 60Hz Delay。
 
 3. **触控 vs 触摸板**  
-   原生触控合成 + ArkTS `sdlInputMouse` 是否双击、错位、被 letterbox/竖屏偏移打偏。对照 KR2 `krkrsdl_harmony.cpp` 手势状态机。OA 文档里的 Android 手势（按下不发、抬起先 motion；见 `docs/PLATFORMS.md`）在 OHOS 上是否仍适用未核实。
+   原生触控合成 + ArkTS `sdlInputMouse` 是否双击、错位、被 letterbox/竖屏偏移打偏。对照 KR2 `krkrsdl_harmony.cpp` 手势状态机。OA 文档里的 Android 手势（按下不发、抬起先 motion；见 `docs/PLATFORMS.md`）在 OHOS 上是否仍适用未核实。  
+   **2026-09-24 已定案**：OHOS 的 SDL 事件层（`SDL2/src/video/ohos/SDL_ohosevents.c`）只产
+   生前后台生命周期事件，**没有任何 FINGER/触摸事件**；宿主 C 层也没有 XComponent 原生
+   触摸注册。所以 OA 的 `touch_handle`（Android 式手势合成）在 OHOS 上是死代码，唯一
+   的指针输入 = ArkTS 触摸板覆盖层（`GamePlay.ets handleTouchpadTouch` →
+   `entry.sdlInputMouse`）。该覆盖层只在 TOUCHPAD 模式挂载，而模式默认是 JOYSTICK
+   （RPG Maker 摇杆语义）——Artemis 游戏默认状态下**完全收不到点击**（能启动、不能点的
+   根因）。修复：`GamePlay.ets` 未显式设置 `rpgMakerMouseControlMode` 时，16/17 默认
+   TOUCHPAD；KR2/Ren'Py 等此前能用的游戏说明用户已切过触摸板，不受影响。"双击/双注入"
+   担忧不成立（FINGER 不存在，无第二来源）。
 
 4. **前后台**  
    KR2 后台 `SDL_Delay(50)` 且不 render。OA 有 lifecycle watch 重置 tick 时钟。进后台是否仍 vsync 空转、回前台是否巨 delta，要测。
+
+4b. **个别游戏舞台分辨率不对（2026-09-24 已修）**  
+   根因：宿主以 `--platform android` 引导，`Project::open` 优先读 system.ini 的
+   `[ANDROID]` 段；带过官方/移植手机版的包其 `[ANDROID]` WIDTH/HEIGHT 是移动版几何
+   （偏小/与 PC 设计不符），而脚本排版标签和 `s.screen_width/s.screen_height` 都假定
+   PC 设计分辨率。修复：`src/core/fs/project.cpp` 在解析段非 WINDOWS 且包内有
+   `[WINDOWS]` 段时，WIDTH/HEIGHT 改从 `[WINDOWS]` 取（其余键 BOOT/CHARSET/SAVEPATH/env
+   仍按原段）。覆盖发生时打印 `[project] stage geometry from [WINDOWS] WxH
+   (section [X] differs)`，真机 hilog 可直接核对。无 `[WINDOWS]` 的包行为不变。
 
 5. **Web 通道回归**  
    设置切 `web` 仍应走 `WebGamePlay` + `artemis_runtime`。不要为了修 native 误伤 WASM 部署。
@@ -263,7 +281,66 @@ jianyu 开始游戏 heap smash：Theora 紧缓冲。处理：Ogg/Theora 优先�
 
 ---
 
+## 7b. 脚本面兼容契约（2026-09-24 系统化，枫笛/Eustia 案）
+
+游戏侧脚本有两条谱系，引擎必须同时支持：
+- **FPM 系**（tmny31/gzsq…）：剧本 `.iet` 直接用引擎标签（`lyc`/`print`/`trans`…），
+  这些标签在引擎里是 native，过滤器不参与。
+- **原 ASB 命令系**（枫笛等老 artemis 作品）：剧本是 `.asb` 命令流
+  （`print`/`Tati`/`TatiFa`/`Face`/`Back`/`BgmPlay`/`click`/`rp2`/`Window`/`Refresh`…），
+  由**游戏自带的 Lua 框架**（`system/adv/ethomell.lua`、`macro.lua`、`artemis.lua`）
+  用 `tags.<命令名>` 接管。引擎对这些命令名走 Lua 过滤器。
+
+### 契约（两处引擎级规则，任何新作品都依赖）
+
+1. **`tags.X` 返回假值 = 引擎默认处理**。过滤器裁决语义：
+   真值 → 脚本接管；假值（PassThrough）→ **引擎的原生分支必须仍然执行**。
+   曾经 `(!has_builtin && d != Missing)` 把"假值"也算成被消费，于是
+   `tags.print` 的 `if getMessageMode() then … return 1 end return 0` 一返回 0，
+   引擎自己的 `[print]` 就被静默吞掉——**整部作品对话全空**。
+   ⇒ execute_tag 里有原生实现的标签（print/rt/rp/chgmsg/ruby/lyprop/lydel/trans/flip）
+   必须登记进 `is_builtin_tag`（runtime_iet.cpp）。
+
+2. **`s.current_message_layer` 必须可得**（= 当前 chgmsg 的 id）。
+   游戏框架用它判定"是否处于消息模式"：
+   `getMessageMode()` → `e:var("s.current_message_layer")=="adv"/"name"`。
+   引擎缺这个变量时 `e:var` 回 `"0"` ⇒ 框架判定非消息模式 ⇒ `tags.print`/`tags.name`
+   让开处理，文字既不入 backlog 也不上屏。维护点：
+   `RuntimeState::apply_text_event` 的 MessageLayerSwitch / MessageLayerPop（每次切换即写）。
+   参考引擎把它作为系统变量暴露；同类"框架探测引擎状态"的变量缺一个就会静默改变整条流程。
+
+### 排查仪器（都在 OA_* 诊断面，默认零开销）
+
+| 变量 | 看到什么 |
+|---|---|
+| `OA_TAG_TRACE=1`（或 `print,Tati` / `queue` / `calllua`） | 每条脚本标签的执行 + 过滤器裁决（`[filter] … -> Lua CONSUMED / engine`）+ `e:enqueueTag` 入队/排水 + `calllua` 的 raw/resolved 名字 |
+| `OA_TEXT_IN_TRACE=1` | 文本入域：`[textin] layer=… units=… text=…`——区分"文字没送到文本域"与"送到了但落在不出字的层" |
+| `OA_SCENE_LAYERS=1` | 每个带 file 的图层（id/file/vis/alpha/rect）+ **每个消息层的 units/reveal/hidden/drawable** |
+| `OA_SCENE_HANDLERS=1` | 可点击面（id/click/key/rect），UI 打不开时看集合是否随点击变化 |
+| `OA_CLICK_ID="400.2.1.0,@center"` | 合成点击驱动：按图层 id 点（hover 抖动 ±1px 才会触发游戏 rollover 链），`@center` 原地反复点 = 连续推进 VN |
+
+### 排查顺序（"点了没反应 / 没文字 / 没立绘"）
+
+1. `OA_TAG_TRACE=print,Tati,TatiFa` → 命令**执行了没有**；没执行 = 还没走到或没被派发。
+2. `OA_TEXT_IN_TRACE` + `OA_SCENE_LAYERS` → 文字**进没进文本域**、落在哪个层、该层是否 drawable。
+3. 都正常才看渲染/字体面（字体缺失现在有 `[app] font face not found:` 与
+   `default face adopted from script font:` 两行可见日志）。
+
 ## 8. 注意事项（后续 AI 容易踩）
+
+- **`e:getScriptStack()` 是真实调用栈，不是空表**（2026-09-24 实现）。此前它是
+  返回空表的存根，导致 artemis.lua 的 `ReturnStack()`（`ss[#ss].file`，空表即索引
+  nil）抛错、`setonpush_call` 处理器整条链断掉——**表现是"能启动、标题能出、菜单
+  点不动"，但日志里点击事件本身是到达的（`[app] click layer ...`）**。凡是
+  "点了没反应"的报告，先 grep `setonpush_call error` / `attempt to index`，别急着
+  查输入链路（输入链路在 OHOS 上只有 ArkTS 触摸板一个来源，见 §7.3）。
+  形状：`ss[1..n]` 下标，`ss[#ss]` = 当前脚本（无脚本时 `file=""`），其下是
+  `[call]` 调用者；每帧附 `reservedCommands = {}`（引擎未建模予約コマンド，
+  `releaseStack` 的 `rc[#rc]` 取 nil 后安全跳过）。实现：`LuaHost::get_script_stack`
+  （装填点 `build_lua_host`）+ `runtime_lua.cpp l_get_script_stack`。
+- **`OA_SCENE_HANDLERS=1`**：场景可点击面变化时 dump 出 `id/click/key/name`
+  （最多 12 次）。排查"某个 UI 打不开"时看可点击集合有没有随点击变化；
+  `OA_AUTO_START=1` 只认 tmny31 系标题的 `bt_start`，不要当通用工具用。
 
 - 对照实现是 **KR2 Harmony**，不是 OA 自己的 Android Gradle 壳，也不是桌面 60Hz cap。
 - 不要用 `SDL_GL_GetProcAddress` 在 OHOS 上取 GLES3。

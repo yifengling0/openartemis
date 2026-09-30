@@ -36,6 +36,7 @@
 
 #include "core/media/image.h"
 #include "core/util/charset.h"
+#include "core/util/trace_sink.h"
 
 namespace oa::runtime {
 
@@ -1187,15 +1188,49 @@ namespace {
 
 /// Tags the engine dispatches natively (registry + special cases).
 bool is_builtin_tag(const std::string& tag) {
+    // 控制流标签 + execute_tag 里有【原生实现】的文本/图层标签。
+    //
+    // 后者必须在此登记：过滤器的裁决规则是
+    //   if (d == Consume || (!has_builtin && d != Missing)) return;  // 被 Lua 吃掉
+    // 也就是说 has_builtin=false 的标签，只要游戏注册了 tags.X【并且返回了
+    // 假值（PassThrough）】，引擎的原生分支也会被跳过。而游戏框架的
+    // tags.X 普遍是"有状态才处理"：
+    //   function tags.print(e, p) if getMessageMode() then ... return 1 end return 0 end
+    // ⇒ 状态不满足时返回 0，引擎的原生 print 就被静默吞掉——文字永远不入域
+    // （枫笛：对话框全空，text_ev 只剩 ▼）。登记后语义回到参考引擎：
+    // 真值 = 脚本接管；假值/未注册 = 引擎默认处理。
     static const char* kBuiltins[] = {
         "jump",  "goto",   "call",   "return", "stop",   "wt",    "wt0",     "wait",
         "exkey",
         "@",     "var",    "if",     "elseif", "else",  "/if",     "loop",  "/loop",
         "lua",   "reset", "exit",   "gotitle", "yesno", "dialog", "calllua", "macroadd",
         "macrodel", "tag",
+        // 引擎原生实现（execute_tag 内有分支）：
+        "print", "rt",     "rp",     "chgmsg", "ruby",  "lyprop", "lydel", "trans",
+        "flip",
     };
     for (const char* b : kBuiltins) {
         if (tag == b) return true;
+    }
+    return false;
+}
+
+/// OA_TAG_TRACE 的匹配（"1"/空/"all" = 全部；否则逗号分隔的标签名列表）。
+/// 脚本执行面与过滤器裁决共用同一份开关（兼容性排查的核心仪器）。
+bool tag_trace_wanted(const std::string& tag) {
+    static const std::string spec = [] {
+        const char* v = std::getenv("OA_TAG_TRACE");
+        return v ? std::string(v) : std::string();
+    }();
+    if (spec.empty()) return false;
+    if (spec == "1" || spec == "all") return true;
+    for (size_t sp = 0; sp <= spec.size();) {
+        const size_t comma = spec.find(',', sp);
+        const std::string one =
+            spec.substr(sp, comma == std::string::npos ? std::string::npos : comma - sp);
+        if (!one.empty() && one == tag) return true;
+        if (comma == std::string::npos) break;
+        sp = comma + 1;
     }
     return false;
 }
@@ -1488,8 +1523,15 @@ static TagOutcome execute_tag(Interpreter& it, const Instruction& ins, bool appl
             }
             if (d == oa::runtime::FilterDecision::Consume ||
                 (!has_builtin && d != oa::runtime::FilterDecision::Missing)) {
+                if (tag_trace_wanted(tag))
+                    std::printf("[filter] [%s] -> Lua CONSUMED (verdict=%d)\n",
+                                tag.c_str(), int(d));
                 return out; // consumed by Lua
             }
+            if (tag_trace_wanted(tag))
+                std::printf("[filter] [%s] -> engine (verdict=%d native=%d builtin=%d)\n",
+                            tag.c_str(), int(d), is_engine_native ? 1 : 0,
+                            has_builtin ? 1 : 0);
         }
     }
 
@@ -1499,10 +1541,29 @@ static TagOutcome execute_tag(Interpreter& it, const Instruction& ins, bool appl
             throw ScriptError("runtime", "calllua missing function parameter", ins.line);
         }
         const std::string function = eval.resolve_param_str(raw);
+        // 先记名字再判空：解析成空的名字会在此静默返回，而"名字为什么是空的"
+        // 正是排查点（原始 raw 必须可见）。
+        if (tag_trace_wanted("calllua")) {
+            static int traced = 0;
+            if (traced++ < 4000)
+                std::fprintf(stderr, "[calllua] raw='%s' resolved='%s'\n", raw.c_str(),
+                             function.c_str());
+        }
         if (function.empty()) return out; // optional callback -> silent
         std::map<std::string, std::string> extra;
         for (const auto& [k, v] : ins.params) {
             if (k != "function") extra[k] = eval.resolve_param(v).to_string();
+        }
+        // OA_TAG_TRACE 含 calllua 时打印每次 Lua 分发（名字 + 参数）——
+        // "游戏框架的处理器到底被调用了没有"的唯一直接证据。
+        if (tag_trace_wanted("calllua")) {
+            static int traced = 0;
+            if (traced++ < 4000) {
+                std::string ps;
+                for (const auto& [k, v] : extra) ps += " " + k + "=" + v.substr(0, 40);
+                std::printf("[calllua] %s%s\n", function.c_str(), ps.c_str());
+                std::fflush(stdout);
+            }
         }
         const auto& hook = it.hooks().call_lua_function;
         if (!hook) {
@@ -1973,6 +2034,36 @@ ExecutionResult Interpreter::run() {
                                  ? current_script_name_->c_str() : "?",
                              current_line_, tag_queue_.size());
         }
+        // OA_TAG_TRACE=1: 打印每条执行的脚本标签（含 data/val 首段）。
+        // 兼容性排查的核心仪器：剧本是 ASB→标签流，命令名（DrawSprite/print/
+        // TatiFa…）到底有没有被执行、执行成什么，只能在这里看。
+        // OA_TAG_TRACE=print,Tati 形式 = 只追这些标签（逗号分隔），长剧本的
+        // 定点观察用；缺省限流 400 条。
+        // M1 结构化 trace（OA_TRACE_JSONL）：每条标签一行，供差分/聚类消费。
+        if (oa::util::Trace::instance().enabled()) {
+            oa::util::trace_event("script", "tag", now_ms(),
+                {{"file", current_script_name_ ? *current_script_name_ : ""},
+                 {"line", std::to_string(ins.line)},
+                 {"tag", ins.tag}});
+        }
+        if (tag_trace_wanted(ins.tag)) {
+            static int traced = 0;
+            if (traced < 400) {
+                std::string params;
+                for (const auto& [k, v] : ins.params) {
+                    if (k != "data" && k != "val" && k != "file" && k != "1" &&
+                        k != "0")
+                        continue;
+                    params += " " + k + "=" + v.substr(0, 70);
+                }
+                std::printf("[tag] %s:%zu [%s]%s\n",
+                            current_script_name_ ? current_script_name_->c_str() : "?",
+                            ins.line, ins.tag.c_str(), params.c_str());
+                ++traced;
+                if (traced == 400) std::printf("[tag] (trace limit reached)\n");
+                std::fflush(stdout);
+            }
+        }
         const TagOutcome outcome = execute_tag(*this, ins, true);
 
         switch (outcome.kind) {
@@ -2270,6 +2361,16 @@ oa::runtime::LuaHost Interpreter::build_lua_host() {
         ins.tag = std::move(tag);
         ins.params = std::move(params);
         ins.line = 0;
+        // OA_TAG_TRACE 含 queue 时打印入队（immediate 语义 + 标签名）——
+        // 游戏框架大量用 e:enqueueTag 做延迟动作（print_text / lytween…），
+        // 这类标签没执行时"文字/窗口都不出"，入队与排水的两端必须可见。
+        if (tag_trace_wanted("queue")) {
+            static int traced = 0;
+            if (traced++ < 4000) {
+                std::fprintf(stderr, "[queue] tag=%s immediate=%d\n", ins.tag.c_str(),
+                             immediate ? 1 : 0);
+            }
+        }
         if (immediate) {
             enqueue_tag_immediate(std::move(ins.tag), std::move(ins.params));
         } else {
@@ -2338,6 +2439,17 @@ oa::runtime::LuaHost Interpreter::build_lua_host() {
         return now_ms() * fps / 1000;
     };
     host.get_wait_reason = [this] { return wait_reason_info_; };
+    host.get_script_stack = [this] {
+        // 参考引擎契约：栈顶 = 当前执行脚本（空串 = 无脚本），其下依次是
+        // [call] 调用者（call_stack_ 外层→内层）。artemis.lua 的
+        // ReturnStack/releaseStack/StackCount 与 backlog.lua 的日志跳转都
+        // 按此形状消费。
+        std::vector<LuaHost::ScriptStackFrame> frames;
+        for (const CallFrame& f : call_stack_) frames.push_back({f.script});
+        frames.push_back(
+            {current_script_name_ ? *current_script_name_ : std::string()});
+        return frames;
+    };
     host.now_ms = [this] { return now_ms(); };
     host.platform = [this] { return variables_.platform; };
     host.set_magic_path = [this](const std::string& name, const std::string& path) {
@@ -2393,6 +2505,16 @@ void Interpreter::seed_engine_variables_impl() {
     variables_.set("s.screen_width", Value::make_int(config_.stage_width));
     variables_.set("s.screen_height", Value::make_int(config_.stage_height));
     variables_.set("s.savepath", Value::make_string("save"));
+    // 平台/环境只读查询（compatlab 扫描 unknown_vars + 用法取证后补种子；
+    // 缺失时 e:var 回 "0" 恰好等值，但显式种子让语义可见、不依赖回退）：
+    // - windowstouch：Windows 触控支持有无（conf.lua「対応有無を取得」）。
+    //   本引擎触控由宿主注入（OHOS 触摸板），此查询恒 0 = 非 Windows 触控环境。
+    // - enterbuttonassign：PS 确认键位 0:○ 1:×（func.lua/vsync.lua）。默认 ○。
+    // 不种子 s.builddate / s.datapath（DMM 平台判定：缺失 = 非 DMM 构建，
+    // dmm.lua/dmmck.lua 流程正确 no-op）；不种子 wasm_sync_*（wasm 专属）；
+    // 不种子 s.status.* / s.videovol（游戏自己 [var] 写读，写路径已通）。
+    variables_.set("s.windowstouch", Value::make_string("0"));
+    variables_.set("s.enterbuttonassign", Value::make_string("0"));
 }
 
 bool Interpreter::fire_event(const std::string& event_name) {
@@ -2411,6 +2533,10 @@ bool Interpreter::fire_event(const std::string& event_name) {
         lua_bridge().report_dispatch_error("event", it->second, e.what());
         return false;
     }
+    // P1 §3.1-2 (PERFORMANCE_PLAN): optional bounded GC step after the
+    // per-frame handler (OA_LUA_GCSTEP_KB) — spreads collection over the
+    // frame budget instead of threshold-triggered bursts.
+    if (event_name == "onEnterFrame") lua_bridge().gc_step(LuaBridge::gc_step_kb());
     return true;
 }
 
@@ -2755,6 +2881,12 @@ std::optional<ExecutionResult> Interpreter::flush_tag_queue() {
         tag_queue_.erase(tag_queue_.begin());
         if (immediate_tag_count_ > 0) --immediate_tag_count_;
         if (on_step) on_step(*current_script_name_, current_line_, ins);
+        if (tag_trace_wanted("queue")) {
+            static int traced = 0;
+            if (traced++ < 4000)
+                std::fprintf(stderr, "[drain] tag=%s (remaining=%zu)\n",
+                             ins.tag.c_str(), tag_queue_.size());
+        }
 
         if (std::getenv("OA_SELTRACE") && ins.tag == "call" &&
             current_script_name_ && *current_script_name_ == "system/script.asb" &&

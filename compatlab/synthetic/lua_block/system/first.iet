@@ -1,0 +1,11 @@
+*top
+[lua]
+function syn_w(engine)
+    engine:tag{"var", name="t.lua", data="fromlua"}
+end
+[/lua]
+[calllua function="syn_w"]
+[if estimate="$t.lua == 'fromlua'"]
+[print data="lua ok"]
+[endif]
+[exit]

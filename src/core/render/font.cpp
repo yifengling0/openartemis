@@ -359,6 +359,8 @@ FT_Face FontSystem::load_font_face(const std::string& logical)
     if (logical.empty()) return nullptr;
     const auto fit = font_faces.find(logical);
     if (fit != font_faces.end()) return fit->second.face;
+    // 负缓存：不可加载的 face 只探测一次（face_for 在逐字形热路径上）。
+    if (face_missing_.count(logical)) return nullptr;
     // 候选：原路径 / .otf / .ttf（face 可带 magic 前缀）
     std::optional<std::vector<uint8_t>> bytes;
     std::string resolved_name = logical;
@@ -373,16 +375,36 @@ FT_Face FontSystem::load_font_face(const std::string& logical)
         }
     }
 
-    if (!bytes) return nullptr;
+    if (!bytes) {
+        face_missing_.insert(logical);
+        // 静默缺字体曾让"文本框/任务面板一个字都没有"排查绕远路：
+        // 每个新 face 的失败留一行（face 数量有限，不会刷屏）。
+        std::fprintf(stderr, "[app] font face not found: %s\n", logical.c_str());
+        return nullptr;
+    }
     FaceEntry fe;
     fe.bytes = *bytes;
     FT_Face face = nullptr;
     if (FT_New_Memory_Face(ft_lib, fe.bytes.data(), (FT_Long)fe.bytes.size(), 0,
         &face) != 0) {
+        face_missing_.insert(logical);
+        std::fprintf(stderr, "[app] font face unusable: %s\n", resolved_name.c_str());
         return nullptr;
     }
     fe.face = face;
     font_faces[logical] = std::move(fe);
+    // 项目自带字体接管默认面：引擎默认面只解析 font/ 目录，而 artemis 系
+    // 作品把字体放在 image/font/ 并由脚本 [font face=...] 显式声明。默认面为
+    // 空时用第一个成功加载的脚本字体兜底——未声明 face 的层（提示、任务面板
+    // 等）才有字形；参考引擎里"项目字体"本就是全局正文字体。
+    if (!default_face) {
+        default_face = font_faces[logical].face;
+        if (!adopted_default_logged_) {
+            adopted_default_logged_ = true;
+            std::printf("[app] default face adopted from script font: %s\n",
+                        resolved_name.c_str());
+        }
+    }
     // Per-face-load debug line (OA_DEBUG_FONT=1); see text.cpp font_debug_enabled.
     const char* dbg = std::getenv("OA_DEBUG_FONT");
     if (dbg && *dbg == '1' && !dbg[1])
@@ -713,7 +735,17 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
                                    double opacity)
 {
     if (!backend) return 0;
-    if (!default_face && font_faces.empty()) return 0;
+    // 字体可用性门槛。曾经这里是 `!default_face && font_faces.empty()` 直接
+    // return 0 —— 默认面解析失败（项目把字体放在 font/ 之外的自定义目录，
+    // 如 artemis 系的 image/font/）时，它在任何逐层 face 被尝试之前就短路，
+    // 于是每层自带的 face 永远没机会加载，【整个游戏一个字都不出】，且无
+    // 任何日志。现在只对"本层 face 已知不可加载"短路：首次进入会让 layout
+    // 去加载本层 face（成功后 font_faces 非空、并被接管为默认面）；失败则
+    // 进 face_missing_ 负缓存，后续帧不再重复 layout。
+    if (!default_face && font_faces.empty()) {
+        const std::string layer_face = ml.font.face();
+        if (layer_face.empty() || face_missing_.count(layer_face)) return 0;
+    }
     const oa::render::LaidPage page = oa::render::layout_page(
         ml, metrics_fn, rt_->text().layout_config(), this);
     if (page.glyphs.empty()) return 0;

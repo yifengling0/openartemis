@@ -1,0 +1,8 @@
+*top
+[chgmsg id="adv"]
+[print data="adv layer"]
+[/chgmsg]
+[chgmsg id="name"]
+[print data="name layer"]
+[/chgmsg]
+[exit]

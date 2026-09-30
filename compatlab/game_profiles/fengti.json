@@ -1,0 +1,1036 @@
+{
+ "root": "D:/Games/Pomelo/Ar_枫笛_脏翅膀_od",
+ "package": {
+  "pfs": true,
+  "version": "8",
+  "volumes": 2,
+  "files": 38807
+ },
+ "asset_types": {
+  "asb": 204,
+  "csv": 1,
+  "dat": 3,
+  "exe": 1,
+  "iet": 8,
+  "ini": 1,
+  "jpg": 415,
+  "lua": 34,
+  "ogg": 38541,
+  "ogv": 12,
+  "otf": 2,
+  "png": 5229,
+  "ttf": 1,
+  "wav": 5
+ },
+ "asb_commands": {
+  "/ruby": 2,
+  "AnimateSprite": 8,
+  "Back": 191,
+  "BgmPlay": 133,
+  "BgmStop": 216,
+  "BgmX": 1,
+  "Blackout": 29,
+  "CancelSkipping": 2,
+  "ChangeBustshot": 1,
+  "ChangeWindowColor": 10,
+  "ChangeWindowDesign": 20,
+  "CheckQuickJump": 7,
+  "ClrFace": 1920,
+  "ClrTati": 143,
+  "DisableGradation": 2,
+  "DisableWindow": 50,
+  "DisableWindowEx": 4,
+  "DrawBG": 17,
+  "DrawScene": 5,
+  "DrawSprite": 144,
+  "DrawSpriteEx": 1,
+  "DrawSpriteWithFiltering": 22,
+  "EnableHorizontalGradation": 2,
+  "Ending_Base": 6,
+  "Event": 10,
+  "EventMN": 1,
+  "Face": 314,
+  "FadeFilm": 37,
+  "FadeScene": 5,
+  "FadeSprite": 62,
+  "FadeSpriteWithFiltering": 19,
+  "Fadeout": 154,
+  "Flash": 34,
+  "GameMode": 1,
+  "GetExecutionMode": 12,
+  "GetGlobalFlag": 6,
+  "GetLocalFlag": 3,
+  "Hcg": 102,
+  "Jishin": 1,
+  "LoadValueFromLocalWork": 3,
+  "LoopSE": 37,
+  "MoveBustshot": 2,
+  "MoveSprite": 129,
+  "NextDay": 13,
+  "Quake": 44,
+  "Refresh": 4872,
+  "ResetSc": 5,
+  "RouteFlag": 8,
+  "SEPlay": 224,
+  "SEStop": 438,
+  "ScrollBG": 2,
+  "Select": 3,
+  "SetColorOfMonologue": 14,
+  "SetColorOfRain": 13,
+  "SetEndOfScene": 6,
+  "SetGlobalFlag": 20,
+  "SetJumpLabel": 12,
+  "SetLocalFlag": 3,
+  "SetQuantityOfRainfall": 13,
+  "SetValidityOfInput": 7,
+  "SetValidityOfLoading": 10,
+  "SetValidityOfRainfall": 16,
+  "SetValidityOfSaving": 10,
+  "SetValidityOfSkipping": 7,
+  "SetVectorOfSightForRainfall": 13,
+  "Size": 42,
+  "StartShakingOfSprite": 6,
+  "StopStreamingSE": 234,
+  "StoreValueToLocalWork": 5,
+  "Tati": 163,
+  "TatiFa": 2553,
+  "TerminateExecutionOfScript": 7,
+  "TerminateShakingOfAllObjects": 1,
+  "View": 5,
+  "ViewEnd": 5,
+  "Voice": 6444,
+  "Wait": 22,
+  "WaitForInput": 1,
+  "WaitToFinishMoviePlayingOnSprite": 1,
+  "WaitToFinishSpriteControlling": 1,
+  "WhiteoutBySA": 8,
+  "Window": 190,
+  "blur_set": 4,
+  "click": 11984,
+  "exif": 16,
+  "exswitch": 3,
+  "flip": 1,
+  "jump": 6,
+  "lyc2": 4,
+  "lydel": 2,
+  "lytweendel": 1,
+  "msgon": 30,
+  "name": 7010,
+  "print": 11992,
+  "rain_mja": 2,
+  "return_main": 40,
+  "rp2": 11984,
+  "rpx": 4,
+  "ruby": 2,
+  "sel_init": 4,
+  "sel_text": 8,
+  "select": 4,
+  "set_vsync": 1,
+  "tween": 5,
+  "wait": 1,
+  "wt": 1
+ },
+ "asb_param_shape": {
+  "/ruby": {
+   "": 2
+  },
+  "AnimateSprite": {
+   "0|1|10|11|12|13|14|15|16|17|18|2|3|4|5|6|7|8|9": 8
+  },
+  "Back": {
+   "0|1": 191
+  },
+  "BgmPlay": {
+   "0|1|2": 133
+  },
+  "BgmStop": {
+   "0|1": 216
+  },
+  "BgmX": {
+   "0|1": 1
+  },
+  "Blackout": {
+   "0|1": 29
+  },
+  "CancelSkipping": {
+   "": 2
+  },
+  "ChangeBustshot": {
+   "0|1|2|3": 1
+  },
+  "ChangeWindowColor": {
+   "0": 10
+  },
+  "ChangeWindowDesign": {
+   "0": 20
+  },
+  "CheckQuickJump": {
+   "0": 7
+  },
+  "ClrFace": {
+   "": 1920
+  },
+  "ClrTati": {
+   "0": 143
+  },
+  "DisableGradation": {
+   "0|1": 2
+  },
+  "DisableWindow": {
+   "": 50
+  },
+  "DisableWindowEx": {
+   "0": 4
+  },
+  "DrawBG": {
+   "0|1|2": 17
+  },
+  "DrawScene": {
+   "0|1": 5
+  },
+  "DrawSprite": {
+   "0|1|10|11|12|13|14|15|2|3|4|5|6|7|8|9": 144
+  },
+  "DrawSpriteEx": {
+   "0|1|10|11|12|13|14|15|16|17|18|2|3|4|5|6|7|8|9": 1
+  },
+  "DrawSpriteWithFiltering": {
+   "0|1|10|11|12|2|3|4|5|6|7|8|9": 22
+  },
+  "EnableHorizontalGradation": {
+   "0|1|2": 2
+  },
+  "Ending_Base": {
+   "0": 6
+  },
+  "Event": {
+   "0|1": 10
+  },
+  "EventMN": {
+   "0|1": 1
+  },
+  "Face": {
+   "0": 314
+  },
+  "FadeFilm": {
+   "0|1": 37
+  },
+  "FadeScene": {
+   "0": 5
+  },
+  "FadeSprite": {
+   "0|1|2": 61,
+   "0|1": 1
+  },
+  "FadeSpriteWithFiltering": {
+   "0|1|2|3|4": 19
+  },
+  "Fadeout": {
+   "0|1": 154
+  },
+  "Flash": {
+   "0": 34
+  },
+  "GameMode": {
+   "0": 1
+  },
+  "GetExecutionMode": {
+   "": 12
+  },
+  "GetGlobalFlag": {
+   "0": 6
+  },
+  "GetLocalFlag": {
+   "0": 3
+  },
+  "Hcg": {
+   "0|1": 102
+  },
+  "Jishin": {
+   "0": 1
+  },
+  "LoadValueFromLocalWork": {
+   "0": 3
+  },
+  "LoopSE": {
+   "0|1|2": 37
+  },
+  "MoveBustshot": {
+   "0|1|2|3|4|5|6|7": 2
+  },
+  "MoveSprite": {
+   "0|1|2|3|4|5|6|7|8|9": 129
+  },
+  "NextDay": {
+   "": 13
+  },
+  "Quake": {
+   "0": 44
+  },
+  "Refresh": {
+   "": 4872
+  },
+  "ResetSc": {
+   "": 5
+  },
+  "RouteFlag": {
+   "": 8
+  },
+  "SEPlay": {
+   "0|1|2": 224
+  },
+  "SEStop": {
+   "0|1": 438
+  },
+  "ScrollBG": {
+   "0|1|10|2|3|4|5|6|7|8|9": 2
+  },
+  "Select": {
+   "0|1": 3
+  },
+  "SetColorOfMonologue": {
+   "0|1|2": 14
+  },
+  "SetColorOfRain": {
+   "0|1|2|3": 13
+  },
+  "SetEndOfScene": {
+   "0": 6
+  },
+  "SetGlobalFlag": {
+   "0|1": 20
+  },
+  "SetJumpLabel": {
+   "0": 12
+  },
+  "SetLocalFlag": {
+   "0|1": 3
+  },
+  "SetQuantityOfRainfall": {
+   "0": 13
+  },
+  "SetValidityOfInput": {
+   "0": 7
+  },
+  "SetValidityOfLoading": {
+   "0": 10
+  },
+  "SetValidityOfRainfall": {
+   "0|1|2": 16
+  },
+  "SetValidityOfSaving": {
+   "0": 10
+  },
+  "SetValidityOfSkipping": {
+   "0": 7
+  },
+  "SetVectorOfSightForRainfall": {
+   "0": 13
+  },
+  "Size": {
+   "0": 42
+  },
+  "StartShakingOfSprite": {
+   "0|1|2|3|4|5|6": 6
+  },
+  "StopStreamingSE": {
+   "0": 234
+  },
+  "StoreValueToLocalWork": {
+   "0|1": 5
+  },
+  "Tati": {
+   "0|1|2|3|4": 163
+  },
+  "TatiFa": {
+   "0|1|2|3|4": 2553
+  },
+  "TerminateExecutionOfScript": {
+   "": 7
+  },
+  "TerminateShakingOfAllObjects": {
+   "0|1": 1
+  },
+  "View": {
+   "0": 5
+  },
+  "ViewEnd": {
+   "": 5
+  },
+  "Voice": {
+   "0": 6444
+  },
+  "Wait": {
+   "0": 22
+  },
+  "WaitForInput": {
+   "": 1
+  },
+  "WaitToFinishMoviePlayingOnSprite": {
+   "0|1": 1
+  },
+  "WaitToFinishSpriteControlling": {
+   "0|1": 1
+  },
+  "WhiteoutBySA": {
+   "0|1": 8
+  },
+  "Window": {
+   "0": 190
+  },
+  "blur_set": {
+   "file|id|number|pattern|priority|size|time|wait": 4
+  },
+  "click": {
+   "": 11984
+  },
+  "exif": {
+   "data|label": 16
+  },
+  "exswitch": {
+   "data": 3
+  },
+  "flip": {
+   "": 1
+  },
+  "jump": {
+   "label": 6
+  },
+  "lyc2": {
+   "alpha|anchorx|anchory|file|id|layermode": 2,
+   "file|id": 1,
+   "alpha|file|id|layermode|x": 1
+  },
+  "lydel": {
+   "id": 2
+  },
+  "lytweendel": {
+   "id": 1
+  },
+  "msgon": {
+   "": 30
+  },
+  "name": {
+   "0": 7010
+  },
+  "print": {
+   "data": 11992
+  },
+  "rain_mja": {
+   "file|loop|priority|time": 1,
+   "file|priority": 1
+  },
+  "return_main": {
+   "0": 40
+  },
+  "rp2": {
+   "": 11984
+  },
+  "rpx": {
+   "": 4
+  },
+  "ruby": {
+   "text": 2
+  },
+  "sel_init": {
+   "name": 4
+  },
+  "sel_text": {
+   "exp|label|text": 8
+  },
+  "select": {
+   "": 4
+  },
+  "set_vsync": {
+   "name": 1
+  },
+  "tween": {
+   "id|loop|rotate|time": 2,
+   "id|loop|time|y": 1,
+   "alpha|id|time": 1,
+   "id|time|x": 1
+  },
+  "wait": {
+   "time": 1
+  },
+  "wt": {
+   "": 1
+  }
+ },
+ "iet_tags": {
+  "Blackout": 2,
+  "CallScript": 182,
+  "DrawSprite": 3,
+  "FadeFilm": 2,
+  "FadeOutBGM": 4,
+  "FadeOutSE": 1,
+  "FadeSprite": 3,
+  "GetLocalFlag": 5,
+  "LoadValueFromLocalWork": 2,
+  "MoveSprite": 1,
+  "SEPlay": 1,
+  "SEStop": 1,
+  "SetValidityOfLoading": 1,
+  "SetValidityOfSaving": 1,
+  "StopBGM": 4,
+  "StopSE": 1,
+  "StoreValueToLocalWork": 4,
+  "TerminateExecutionOfScript": 6,
+  "Wait": 1,
+  "allkeyclick": 6,
+  "allkeystart": 4,
+  "allkeystop": 3,
+  "attack_check": 2,
+  "automode": 1,
+  "autosave": 3,
+  "bg": 11,
+  "bg_reset": 6,
+  "bgm": 2,
+  "bgmstop": 2,
+  "black": 6,
+  "btn_attack": 1,
+  "btn_start": 5,
+  "btn_stop": 3,
+  "btnoff": 1,
+  "btnon": 4,
+  "btnstat": 6,
+  "call": 5,
+  "calllua": 146,
+  "caption": 1,
+  "check_qload": 2,
+  "chgmsg": 22,
+  "clear_memory": 2,
+  "debug": 1,
+  "debugprint": 4,
+  "dialog": 3,
+  "direction": 2,
+  "else": 17,
+  "elseif": 3,
+  "ev": 2,
+  "exit": 2,
+  "fg_delall": 18,
+  "flash": 2,
+  "flip": 18,
+  "font": 2,
+  "fontinit": 1,
+  "game_exit": 3,
+  "get_skip": 2,
+  "hp_mask": 3,
+  "httpload": 1,
+  "if": 52,
+  "jump": 6,
+  "key_kill": 1,
+  "key_start": 4,
+  "key_stop": 4,
+  "keyconfig": 3,
+  "load": 1,
+  "load_broken": 7,
+  "load_fadeout": 3,
+  "load_trans": 1,
+  "logo": 3,
+  "lua": 5,
+  "lyc": 14,
+  "lyc2": 2,
+  "lydel": 41,
+  "lyevent": 5,
+  "lyevent2": 1,
+  "lyprop": 7,
+  "lytween": 10,
+  "lytweendel": 5,
+  "menu_off": 1,
+  "menu_on": 1,
+  "msg_hide": 2,
+  "msg_show": 4,
+  "msgoff": 11,
+  "msgon": 6,
+  "no": 1,
+  "print": 2,
+  "quake": 5,
+  "quicksave": 1,
+  "reset": 1,
+  "reset2": 1,
+  "return": 131,
+  "rp": 6,
+  "rt": 1,
+  "save": 2,
+  "save_off": 1,
+  "save_on": 1,
+  "savess": 1,
+  "scein": 5,
+  "sceout": 5,
+  "scetween": 8,
+  "script": 1,
+  "se_none": 2,
+  "se_saveok": 1,
+  "skip": 1,
+  "stop": 17,
+  "sys_trans": 23,
+  "sysse": 1,
+  "system_btnoff": 4,
+  "system_btnon": 2,
+  "system_save": 2,
+  "takess": 1,
+  "trans": 20,
+  "trans2": 1,
+  "tween": 2,
+  "ui_return": 8,
+  "ui_start": 1,
+  "ui_stop": 2,
+  "var": 49,
+  "video": 1,
+  "wait": 22,
+  "wt": 18,
+  "wt0": 11,
+  "yesno": 15
+ },
+ "lua": {
+  "files": 34,
+  "tags_handlers": {
+   "/font": 1,
+   "/ruby": 1,
+   "@": 1,
+   "AnimateSprite": 1,
+   "Back": 1,
+   "BgmNo": 1,
+   "BgmPlay": 1,
+   "BgmShow": 1,
+   "BgmStop": 1,
+   "BgmVol": 1,
+   "BgmX": 1,
+   "Blackout": 1,
+   "CallSavingWindow": 1,
+   "CallScript": 1,
+   "CancelSkipping": 1,
+   "ChangeBustshot": 1,
+   "ChangeCameraAngleOfRainfall": 1,
+   "ChangeScene": 1,
+   "ChangeVolumeOfBGM": 1,
+   "ChangeVolumeOfStreamingSE": 1,
+   "ChangeWindowColor": 1,
+   "ChangeWindowDesign": 1,
+   "CheckQuickJump": 1,
+   "ClrFace": 1,
+   "ClrTati": 1,
+   "CompleteBGControlling": 1,
+   "ControlMotionOfBG": 1,
+   "DisableGradation": 1,
+   "DisableWindow": 1,
+   "DisableWindowEx": 1,
+   "DrawBG": 1,
+   "DrawBGEx": 1,
+   "DrawBGWithMask": 1,
+   "DrawBustshot": 1,
+   "DrawBustshotWithFiltering": 1,
+   "DrawFace": 1,
+   "DrawFilm": 1,
+   "DrawMusicTelop": 1,
+   "DrawScene": 1,
+   "DrawSceneByVirtualBG": 1,
+   "DrawSceneWithMask": 1,
+   "DrawScreen": 1,
+   "DrawSprite": 1,
+   "DrawSpriteEx": 1,
+   "DrawSpriteWithFiltering": 1,
+   "EnableHorizontalGradation": 1,
+   "EnableWindow": 1,
+   "EnableWindowEx": 1,
+   "Ending_Base": 1,
+   "EnlargeBG": 1,
+   "Event": 1,
+   "EventCut": 1,
+   "EventMN": 1,
+   "EventModeEnd": 1,
+   "EventModeStart": 1,
+   "ExecutePlannedControl": 1,
+   "Face": 1,
+   "FadeBG": 1,
+   "FadeBGWithMask": 1,
+   "FadeBustshot": 1,
+   "FadeFace": 1,
+   "FadeFilm": 1,
+   "FadeOutBGM": 1,
+   "FadeOutSE": 1,
+   "FadeOutStreamingSE": 1,
+   "FadeScene": 1,
+   "FadeSceneWithMask": 1,
+   "FadeSprite": 1,
+   "FadeSpriteWithFiltering": 1,
+   "Fadeout": 1,
+   "Flash": 1,
+   "GameMode": 1,
+   "GetExecutionMode": 1,
+   "GetGlobalFlag": 1,
+   "GetLocalFlag": 1,
+   "GetPositionOfBG": 1,
+   "Hcg": 1,
+   "Jishin": 1,
+   "LoadValueFromGlobalWork": 1,
+   "LoadValueFromLocalWork": 1,
+   "LoopSE": 1,
+   "MoveBustshot": 1,
+   "MoveSprite": 1,
+   "MoveSpriteEx": 1,
+   "MovieInit": 1,
+   "OptimizePositionOfBG": 1,
+   "PlayBGM": 1,
+   "PlayDividedBGM": 1,
+   "PlayMovie": 1,
+   "PlaySE": 1,
+   "PlayVoice": 1,
+   "PreloadBitmap": 1,
+   "Quake": 1,
+   "Refresh": 1,
+   "RegisterTextToHistory": 1,
+   "ResetSc": 1,
+   "RotateBG": 1,
+   "RouteFlag": 1,
+   "SEPlay": 1,
+   "SEStop": 1,
+   "ScrollBG": 1,
+   "Select": 1,
+   "SetBacklog": 1,
+   "SetCameraAngleOfRainfall": 1,
+   "SetColorOfMonologue": 1,
+   "SetColorOfRain": 1,
+   "SetEndOfScene": 1,
+   "SetGlobalFlag": 1,
+   "SetInitialPositionOfBG": 1,
+   "SetJumpLabel": 1,
+   "SetLocalFlag": 1,
+   "SetLogicalZPositionOfBG": 1,
+   "SetParameterForImageWaveringOfSprite": 1,
+   "SetPriorityOfRainfallScreen": 1,
+   "SetQuantityOfRainfall": 1,
+   "SetValidityOfInput": 1,
+   "SetValidityOfLoading": 1,
+   "SetValidityOfRainfall": 1,
+   "SetValidityOfSaving": 1,
+   "SetValidityOfSkipping": 1,
+   "SetVectorOfSightForRainfall": 1,
+   "ShakeScreen": 1,
+   "ShakeScreenSx": 1,
+   "Size": 1,
+   "StartShakingOfAllObjects": 1,
+   "StartShakingOfBG": 1,
+   "StartShakingOfBustshot": 1,
+   "StartShakingOfSprite": 1,
+   "StopBGM": 1,
+   "StopSE": 1,
+   "StopStreamingSE": 1,
+   "StoreValueToGlobalWork": 1,
+   "StoreValueToLocalWork": 1,
+   "Tati": 1,
+   "TatiFa": 1,
+   "TerminateExecutionOfScript": 1,
+   "TerminateShakingOfAllObjects": 1,
+   "TerminateShakingOfBG": 1,
+   "TerminateShakingOfBustshot": 1,
+   "TerminateShakingOfSprite": 1,
+   "View": 1,
+   "ViewEnd": 1,
+   "Voice": 1,
+   "Wait": 1,
+   "WaitToFinishBGControlling": 1,
+   "WaitToFinishBustshotControlling": 1,
+   "WaitToFinishMoviePlayingOnBG": 1,
+   "WaitToFinishMoviePlayingOnSprite": 1,
+   "WaitToFinishSEPlaying": 1,
+   "WaitToFinishSpriteControlling": 1,
+   "WaitToFinishVoicePlaying": 1,
+   "WaveBG": 1,
+   "Whiteout": 1,
+   "WhiteoutBySA": 1,
+   "Window": 1,
+   "allkeyclick": 1,
+   "allsestop": 1,
+   "autosave": 1,
+   "bg": 1,
+   "bg2": 1,
+   "bg_del": 1,
+   "bg_init": 1,
+   "bg_reset": 1,
+   "bg_stop": 1,
+   "bgbuff": 1,
+   "bgbuff2": 1,
+   "bgin": 1,
+   "bgm": 1,
+   "bgmstop": 1,
+   "bgout": 1,
+   "bgp": 1,
+   "bgp2": 1,
+   "bgr": 1,
+   "bgv_scroll": 1,
+   "black": 1,
+   "blackend": 1,
+   "blackout": 1,
+   "blur_set": 1,
+   "btn_attack": 1,
+   "btn_click": 1,
+   "btn_start": 1,
+   "btn_stop": 1,
+   "btnoff": 1,
+   "btnon": 1,
+   "cache": 1,
+   "call": 1,
+   "check_qload": 1,
+   "clear_memory": 1,
+   "click": 1,
+   "clickjump": 1,
+   "clickjumpend": 1,
+   "clickjumpsys": 1,
+   "dayin": 1,
+   "dayout": 1,
+   "del_cache": 1,
+   "delay_action": 1,
+   "delay_clear": 1,
+   "delbuff": 1,
+   "endscene": 1,
+   "ev": 1,
+   "exif": 1,
+   "exstop": 1,
+   "exswitch": 1,
+   "fade": 1,
+   "fg": 1,
+   "fg_cache": 1,
+   "fg_change_del": 1,
+   "fg_delall": 1,
+   "fgbuff": 1,
+   "flash": 1,
+   "flip": 1,
+   "font": 1,
+   "for": 1,
+   "hp_mask": 1,
+   "httpload": 1,
+   "if": 1,
+   "jump": 1,
+   "key_kill": 1,
+   "key_start": 1,
+   "key_stop": 1,
+   "load_broken": 1,
+   "load_fadeout": 1,
+   "loading": 1,
+   "loopse": 1,
+   "lyc2": 1,
+   "lyevent2": 1,
+   "menu_check": 1,
+   "menu_off": 1,
+   "menu_on": 1,
+   "msg_hide": 1,
+   "msg_show": 1,
+   "msgoff": 1,
+   "msgon": 1,
+   "name": 1,
+   "print": 1,
+   "push_check": 1,
+   "quake": 1,
+   "rain_mja": 1,
+   "reset2": 1,
+   "return_main": 1,
+   "rin": 1,
+   "rout": 1,
+   "rp2": 1,
+   "rpx": 1,
+   "rt": 1,
+   "ruby": 1,
+   "scenejump": 1,
+   "script": 1,
+   "se": 1,
+   "se_active": 1,
+   "se_cancel": 1,
+   "se_caution": 1,
+   "se_decide": 1,
+   "se_none": 1,
+   "se_ok": 1,
+   "se_saveok": 1,
+   "sel_init": 1,
+   "sel_text": 1,
+   "select": 1,
+   "sestop": 1,
+   "set_vsync": 1,
+   "setscene": 1,
+   "shake50300": 1,
+   "st": 1,
+   "stop": 1,
+   "sysse": 1,
+   "system_btnoff": 1,
+   "system_btnon": 1,
+   "system_save": 1,
+   "title": 1,
+   "trans": 1,
+   "trans2": 1,
+   "tween": 1,
+   "tweendel": 1,
+   "tweetmode": 1,
+   "ui_return": 1,
+   "viewin": 1,
+   "viewout": 1,
+   "voice": 1,
+   "wait": 1,
+   "wait2": 1,
+   "white": 1,
+   "wipein": 1,
+   "wipeout": 1,
+   "wt": 1,
+   "wt0": 1,
+   "wtx": 1,
+   "yesno": 1,
+   "空行": 1,
+   "行末": 1,
+   "行頭": 1
+  },
+  "vars_read": {
+   "g.debugstart": 3,
+   "g.lua.scr": 1,
+   "g.reset": 4,
+   "game.height": 3,
+   "game.width": 3,
+   "li.height": 1,
+   "li.width": 1,
+   "lua.log": 1,
+   "lua.qjb": 1,
+   "lua.scr": 1,
+   "s.copyright": 1,
+   "s.current_message_layer": 3,
+   "s.engineversion": 3,
+   "s.savepath": 24,
+   "s.segain.920.": 1,
+   "s.status.alreadyread": 4,
+   "s.status.avoid": 4,
+   "s.status.commandskip": 1,
+   "s.status.controlskip": 1,
+   "s.status.windowbutton": 4,
+   "s.windowstouch": 4,
+   "s.windowsversion": 1,
+   "t.a": 2,
+   "t.bgm": 1,
+   "t.cond": 1,
+   "t.exf": 3,
+   "t.exif": 1,
+   "t.file": 3,
+   "t.fullscreen": 5,
+   "t.hostcode": 10,
+   "t.hostdata": 10,
+   "t.li.height": 4,
+   "t.li.left": 6,
+   "t.li.top": 6,
+   "t.li.width": 9,
+   "t.ly.left": 1,
+   "t.ly.top": 1,
+   "t.mess": 1,
+   "t.no": 3,
+   "t.reset": 1,
+   "t.switch": 1,
+   "t.text": 2,
+   "t.tmp": 5,
+   "t.tmp1": 2,
+   "t.tmp2": 2,
+   "t.tmps": 2,
+   "t.wait": 1,
+   "t.yesno": 2
+  },
+  "tags_emitted": {
+   "/chgmsg": 51,
+   "/font": 10,
+   "/ruby": 1,
+   "/tweenset": 1,
+   "anime": 15,
+   "automode": 14,
+   "autosave": 3,
+   "avoid": 1,
+   "call": 90,
+   "calllua": 82,
+   "chgmsg": 51,
+   "debug": 6,
+   "delonautomodeout": 7,
+   "deloncommandskipout": 10,
+   "deloncontrolskipin": 3,
+   "deloncontrolskipout": 3,
+   "delonpush": 56,
+   "delonsoundfinish": 1,
+   "exec": 34,
+   "exit": 4,
+   "file": 16,
+   "flip": 18,
+   "font": 13,
+   "fontdefault": 3,
+   "fontinit": 1,
+   "glyph": 2,
+   "httpget": 9,
+   "httppost": 11,
+   "jump": 70,
+   "keyconfig": 26,
+   "load": 3,
+   "load_trans": 1,
+   "lyc": 20,
+   "lydel": 112,
+   "lyedit": 5,
+   "lyevent": 22,
+   "lyprop": 399,
+   "lytween": 39,
+   "lytweendel": 41,
+   "macroadd": 6,
+   "mouse": 6,
+   "name": 1,
+   "openbrowser": 1,
+   "print": 23,
+   "prohibit": 1,
+   "reset": 3,
+   "return": 13,
+   "rp": 42,
+   "rt": 2,
+   "save": 9,
+   "savess": 3,
+   "scein": 4,
+   "sceout": 2,
+   "scetween": 13,
+   "sefade": 3,
+   "sepan": 7,
+   "seplay": 7,
+   "sestop": 10,
+   "setonautomodeout": 1,
+   "setoncommandskipout": 2,
+   "setoncontrolskipin": 2,
+   "setoncontrolskipout": 2,
+   "setonpush": 22,
+   "setonsoundfinish": 1,
+   "setonwindowbutton": 4,
+   "sfade": 6,
+   "skip": 11,
+   "splay": 1,
+   "sstop": 4,
+   "stop": 3,
+   "sys_trans": 2,
+   "takess": 5,
+   "trans": 8,
+   "tweenset": 1,
+   "ui_del": 1,
+   "var": 168,
+   "video": 5,
+   "wait": 15
+  }
+ },
+ "system_ini": {
+  "WINDOWS.WIDTH": "1280",
+  "WINDOWS.HEIGHT": "720",
+  "WINDOWS.FPS": "60",
+  "WINDOWS.CHARSET": "UTF-8",
+  "WINDOWS.BOOT": "system/first.iet",
+  "IOS.WIDTH": "1280",
+  "IOS.HEIGHT": "720",
+  "IOS.CHARSET": "UTF-8",
+  "IOS.BOOT": "system/first.iet",
+  "ANDROID.WIDTH": "1280",
+  "ANDROID.HEIGHT": "720",
+  "ANDROID.CHARSET": "UTF-8",
+  "ANDROID.BOOT": "system/first.iet"
+ },
+ "unknown_vars": [
+  "s.status.commandskip",
+  "s.status.controlskip",
+  "s.windowstouch",
+  "s.status.alreadyread",
+  "s.status.windowbutton",
+  "s.status.avoid",
+  "s.segain.920."
+ ]
+}

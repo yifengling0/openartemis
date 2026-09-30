@@ -372,11 +372,14 @@ public:
     /// field falls back to today's behaviour.
     const oa::fs::CompatConfig& compat_config() const;
     /// Coarse per-tick phase cost (OA_PROFILE): script / content / other.
+    /// lua_kb = 本 tick 末 Lua 堆占用（GC 调优 §3.1-2 的实测面：分配速率
+    /// 与pause/step 实验前后的常驻对比）。
     struct TickProfile {
         uint64_t ticks = 0;
         uint64_t script_us = 0;
         uint64_t content_us = 0;
         uint64_t other_us = 0;
+        uint64_t lua_kb = 0;
     };
     const TickProfile& tick_profile() const;
     /// Whether numbered-save files exist (save slot list checks).

@@ -1,0 +1,6 @@
+*top
+[print data="before"]
+[flip]
+[trans time=0 type=0]
+[print data="after"]
+[exit]

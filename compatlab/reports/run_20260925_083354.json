@@ -1,0 +1,140 @@
+{
+ "run_id": "20260925_083354",
+ "exe": "build_sdl2/src/app/openartemis.exe",
+ "results": [
+  {
+   "id": "syn_boot_min",
+   "wall_s": 0.1,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "key_tags_executed": true
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_var_arith",
+   "wall_s": 0.1,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [
+    "tick error"
+   ],
+   "asserts": {
+    "clean_exit": true,
+    "key_tags_executed": false
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_text_basic",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "key_tags_executed": true
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_trans_clear",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "key_tags_executed": true
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_wait_time",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "key_tags_executed": true
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_jump_call_return",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "key_tags_executed": true
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_loop_jump",
+   "ok": false,
+   "error": "timeout",
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_lua_block",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "key_tags_executed": false
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_chgmsg_two",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "key_tags_executed": true
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  },
+  {
+   "id": "syn_ruby_inline",
+   "wall_s": 0.0,
+   "exit": 0,
+   "digest": null,
+   "clean_exit": true,
+   "fail_hits": [],
+   "asserts": {
+    "clean_exit": true,
+    "key_tags_executed": true
+   },
+   "ok": false,
+   "verdict": "FAIL"
+  }
+ ]
+}

@@ -1,0 +1,7 @@
+*top
+[chgmsg id="adv"]
+[ruby text="かんじ"]
+[print data="漢字"]
+[/ruby]
+[/chgmsg]
+[exit]

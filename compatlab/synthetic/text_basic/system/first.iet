@@ -1,0 +1,9 @@
+*top
+[chgmsg id="adv"]
+[print data="line one"]
+[rt]
+[print data="line two"]
+[rp]
+[print data="page two"]
+[/chgmsg]
+[exit]

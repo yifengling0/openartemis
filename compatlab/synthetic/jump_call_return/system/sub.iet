@@ -1,0 +1,3 @@
+*sub
+[print data="in sub"]
+[return]

@@ -1,0 +1,211 @@
+{
+ "syn_boot_min": {
+  "digest": {
+   "frames": "1",
+   "layers": "0",
+   "layer_ev": "0",
+   "text_ev": "0",
+   "switch_ev": "0",
+   "msg_lines": "0",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_var_arith": {
+  "digest": {
+   "frames": "1",
+   "layers": "1",
+   "layer_ev": "0",
+   "text_ev": "1",
+   "switch_ev": "0",
+   "msg_lines": "1",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_text_basic": {
+  "digest": {
+   "frames": "1",
+   "layers": "1",
+   "layer_ev": "0",
+   "text_ev": "3",
+   "switch_ev": "1",
+   "msg_lines": "1",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_trans_clear": {
+  "digest": {
+   "frames": "1",
+   "layers": "1",
+   "layer_ev": "0",
+   "text_ev": "2",
+   "switch_ev": "0",
+   "msg_lines": "1",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_wait_time": {
+  "digest": {
+   "frames": "67",
+   "layers": "1",
+   "layer_ev": "0",
+   "text_ev": "2",
+   "switch_ev": "0",
+   "msg_lines": "1",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_jump_call_return": {
+  "digest": {
+   "frames": "1",
+   "layers": "1",
+   "layer_ev": "0",
+   "text_ev": "2",
+   "switch_ev": "0",
+   "msg_lines": "1",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_call_self": {
+  "digest": {
+   "frames": "1",
+   "layers": "1",
+   "layer_ev": "0",
+   "text_ev": "3",
+   "switch_ev": "0",
+   "msg_lines": "1",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_loop_bound": {
+  "digest": {
+   "frames": "1",
+   "layers": "1",
+   "layer_ev": "0",
+   "text_ev": "1",
+   "switch_ev": "0",
+   "msg_lines": "1",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_lua_block": {
+  "digest": {
+   "frames": "1",
+   "layers": "1",
+   "layer_ev": "0",
+   "text_ev": "1",
+   "switch_ev": "0",
+   "msg_lines": "1",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_chgmsg_two": {
+  "digest": {
+   "frames": "1",
+   "layers": "2",
+   "layer_ev": "0",
+   "text_ev": "2",
+   "switch_ev": "2",
+   "msg_lines": "2",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ },
+ "syn_ruby_inline": {
+  "digest": {
+   "frames": "1",
+   "layers": "1",
+   "layer_ev": "0",
+   "text_ev": "1",
+   "switch_ev": "1",
+   "msg_lines": "1",
+   "handlers": "0",
+   "wait": "none",
+   "media_ev": "0",
+   "audio_players": "0",
+   "bgm": "0",
+   "se": "0",
+   "voice": "0"
+  },
+  "ok": true,
+  "run": "20260925_084224"
+ }
+}

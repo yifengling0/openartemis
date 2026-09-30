@@ -1,6 +1,7 @@
 #include "core/fs/project.h"
 
 #include <cctype>
+#include <cstdio>
 #include <stdexcept>
 
 #include "core/util/charset.h"
@@ -227,8 +228,38 @@ Project Project::open(const fs::IFileSystem& fs, std::string_view platform) {
         }
         return *v;
     };
-    c.stage_width = parse_int(need("WIDTH"), 1280);
-    c.stage_height = parse_int(need("HEIGHT"), 720);
+    // Stage geometry preference (Harmony lane boots PC packages with
+    // --platform android): packages of games that once shipped a mobile port
+    // carry an [ANDROID] section whose WIDTH/HEIGHT describe the MOBILE
+    // build (small/odd), not the PC design the scripts' layout tags assume —
+    // the engine seeds s.screen_width/s.screen_height and the compositor
+    // stage from these values. Prefer [WINDOWS] geometry whenever the package
+    // ships one; every other key (BOOT/CHARSET/SAVEPATH/env) stays on the
+    // resolved section. Packages without [WINDOWS] are unchanged.
+    int geom_w = 0, geom_h = 0;
+    if (used_section != "WINDOWS") {
+        if (const IniFile::Section* win_sec = p.ini.section("WINDOWS")) {
+            const std::string* w = win_sec->find("WIDTH");
+            const std::string* h = win_sec->find("HEIGHT");
+            if (w && h) {
+                geom_w = parse_int(*w, 0);
+                geom_h = parse_int(*h, 0);
+            }
+        }
+    }
+    if (geom_w > 0 && geom_h > 0) {
+        const std::string* sec_w = sec->find("WIDTH");
+        const std::string* sec_h = sec->find("HEIGHT");
+        if (!sec_w || !sec_h || parse_int(*sec_w, 0) != geom_w ||
+            parse_int(*sec_h, 0) != geom_h) {
+            std::printf("[project] stage geometry from [WINDOWS] %dx%d "
+                        "(section [%s] differs)\n",
+                        geom_w, geom_h, used_section.c_str());
+            std::fflush(stdout);
+        }
+    }
+    c.stage_width = geom_w > 0 ? geom_w : parse_int(need("WIDTH"), 1280);
+    c.stage_height = geom_h > 0 ? geom_h : parse_int(need("HEIGHT"), 720);
     c.boot_script = need("BOOT");
     c.fps = parse_int(ini_get(p.ini, used_section, "FPS"), 60);
     const std::string cs = ini_get(p.ini, used_section, "CHARSET", "");

@@ -281,6 +281,51 @@ LuaBridge::LuaBridge(LuaHost host) : host_(std::move(host)) {
     install_lua_file_io(L_, this);
 
     install_engine_api();
+    tune_gc();
+}
+
+void LuaBridge::tune_gc() {
+    if (!L_) return;
+    // P1 §3.1-2 (PERFORMANCE_PLAN): widen the incremental GC so full
+    // cycles start less often (fewer script-side frame spikes). Lua 5.1.5
+    // ships pause=200 / mul=200 — the plan's "调宽到 200/200" suggestion is
+    // already the vendor default, so the engine default raises pause to
+    // 300: the heap may grow 1.5x further before a cycle starts (script
+    // heaps are a few MB; the latency win is the point). OA_LUA_GCPAUSE /
+    // OA_LUA_GCMUL override either knob; 0 keeps the Lua default. GC
+    // scheduling changes timing only — rendering/journal baselines are
+    // unaffected.
+    int pause = 300;
+    if (const char* v = std::getenv("OA_LUA_GCPAUSE")) pause = std::atoi(v);
+    int mul = 200;
+    if (const char* v = std::getenv("OA_LUA_GCMUL")) mul = std::atoi(v);
+    if (pause > 0) lua_gc(L_, LUA_GCSETPAUSE, pause);
+    if (mul > 0) lua_gc(L_, LUA_GCSETSTEPMUL, mul);
+    std::printf("[lua] gc pause=%d mul=%d step_kb=%d (lua defaults 200/200; "
+                "env OA_LUA_GCPAUSE/OA_LUA_GCMUL/OA_LUA_GCSTEP_KB)\n",
+                pause > 0 ? pause : 200, mul > 0 ? mul : 200, gc_step_kb());
+    std::fflush(stdout);
+}
+
+int LuaBridge::gc_step_kb() {
+    // Per-frame explicit GC step after onEnterFrame (0 = off): with pause
+    // raised, this is the "摊平到帧预算" lever — a bounded incremental step
+    // every frame instead of threshold-triggered bursts.
+    static const int kb = [] {
+        const char* v = std::getenv("OA_LUA_GCSTEP_KB");
+        return v ? std::atoi(v) : 0;
+    }();
+    return kb;
+}
+
+void LuaBridge::gc_step(int kb) {
+    if (!L_ || kb <= 0) return;
+    lua_gc(L_, LUA_GCSTEP, kb);
+}
+
+uint64_t LuaBridge::gc_heap_kb() const {
+    if (!L_) return 0;
+    return uint64_t(lua_gc(L_, LUA_GCCOUNT, 0));
 }
 
 LuaBridge::~LuaBridge() {
@@ -1000,7 +1045,23 @@ int l_get_script_block(lua_State* L) {
 }
 
 int l_get_script_stack(lua_State* L) {
-    lua_createtable(L, 0, 0);
+    // 脚本调用栈（参考引擎语义，LuaHost::get_script_stack 注释）：ss[1..n]，
+    // ss[#ss] = 当前脚本（file 可为 ""），ss[#ss-1] = 直接 [call] 调用者。
+    // 每帧附 reservedCommands = {}（引擎未建模予約コマンド；releaseStack 的
+    // rc[#rc] 取 nil → p=nil → 安全跳过）。
+    const LuaBridge* bridge = bridge_from_state(L);
+    std::vector<LuaHost::ScriptStackFrame> frames;
+    if (bridge->host().get_script_stack) frames = bridge->host().get_script_stack();
+    if (frames.empty()) frames.emplace_back();  // 游戏侧 ss[#ss] 无条件索引
+    lua_createtable(L, int(frames.size()), 0);
+    for (size_t i = 0; i < frames.size(); ++i) {
+        lua_createtable(L, 0, 2);
+        lua_pushlstring(L, frames[i].file.data(), frames[i].file.size());
+        lua_setfield(L, -2, "file");
+        lua_newtable(L);
+        lua_setfield(L, -2, "reservedCommands");
+        lua_rawseti(L, -2, int(i + 1));
+    }
     return 1;
 }
 

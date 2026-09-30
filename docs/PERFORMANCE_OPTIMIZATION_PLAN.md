@@ -10,6 +10,14 @@
 
 同批次的兼容性改造见 **`docs/ART3M1S_REFERENCE_NOTES.md`**（对照 art3m1s/art3m1s-core，
 已修：Lua 存档写入虚拟化、排队 call 屏障、UTF-8 路径、宿主服务桩、每游戏清单）。
+
+**2026-09-24 回填**：清点剩余项时发现 §1.3 的 GLES in-place 分流已在
+`upload_host_frame` 落地（状态表此前漏更）。本日新落地 §3.1-2（Lua GC 调宽 +
+每帧步进开关 + `luaKB` 监测）与渲染侧分段计时（`rscene`/`rtext`/`present`），
+桌面 sdl 线构建通过，tmny31 / gzsq 真包 headless 冒烟（300/600/1200/9000 帧）
+与窗口线 `--fps 30`（tmny31：rscene 0.17 / rtext 0.29 / present 0.72 ms；
+gzsq：rscene 0.46 / present 0.33 ms）全部干净，GC 环境变量开关验证有效。
+
 本文各阶段的实际状态：
 
 | 阶段 | 项 | 状态 |
@@ -20,14 +28,15 @@
 | §1.2-4 | `glGetError` drain 门控（`OA_RENDER_DIAG`） | **已完成** |
 | §1.2-5 | 静态帧跳过 | **已完成**（窗口线 + OHOS 的 re-blit 分支显式保留） |
 | §3.1-1 | 逻辑帧率封顶 60Hz（高刷面板） | **已完成**（`pace_windowed_frame` 在 OHOS 生效） |
-| §1.3 | 视频/E-mote 流式纹理 in-place 更新 | **部分**（GLES `update_texture` 已在；CPU 重上传路径仍存在） |
+| §1.3 | 视频/E-mote 流式纹理 in-place 更新 | **已完成**：`upload_host_frame` 按后端能力分流（`inplace_streaming_update`）——GLES 同尺寸直接 `glTexSubImage2D` 原位更新，尺寸变化才销毁重建；sdl 软件线保留旧的销毁重建路径 |
 | §1.2-3 | 绘制状态去重 | 未做 |
 | §2.1-2 | 图片**负缓存**（缺失名不再每帧重探测） | **已完成**（`decoded_miss_`） |
 | §2.1 | 图片异步解码（默认关，`OA_ASYNC_DECODE=1` 开） | **已实现**：专用 worker 解码，命中/失败回填 `decoded`/`decoded_miss_`，完成即强制一帧重绘；见下方实测 |
 | §2.1-3 | 纹理 LRU 淘汰（GPU 资产纹理，预算 256MB，`OA_TEX_BUDGET_MB` 可调） | **已完成**：`RenderEngine::evict_asset_textures`（未用满则零开销；本机两包资产纹理仅 ~30MB，未触发淘汰） |
-| §3.1-2 | Lua GC 调优 | 未做 |
+| §3.1-2 | Lua GC 调优 | **已完成**（2026-09-24）：引擎默认 `pause=300`（Lua 5.1.5 出厂即 pause=200/mul=200，本文原建议值等于默认，故上调 pause）；`OA_LUA_GCPAUSE`/`OA_LUA_GCMUL` 可覆盖（0 = 回 Lua 默认）；`OA_LUA_GCSTEP_KB` 打开 onEnterFrame 后的每帧定界步进（摊平到帧预算）；启动打印一行 `[lua] gc pause=… mul=… step_kb=…`；`[prof]` 行新增 `luaKB=`（GC A/B 时看常驻增长速率）。GC 只改时机，不影响渲染/journal 基线 |
 | — | Profiler 计数（draw calls / batches / binds / 纹理新建 / 上传字节 / 图片解码次数与耗时 / 读字节）+ `OA_PROFILE` 5 s 差分 | **已完成**（`RenderStats`/`AssetStats` + main.cpp；`tools/real_game_smoke.ps1 -Profile` 落盘基线） |
-| — | 分段计时（逻辑/解释器/文本/合成各自的 ns 桶，x86/OHOS 上按需加） | 未做（当前计数面覆盖渲染/IO；脚本侧用现有 `OA_*` 诊断） |
+| — | 分段计时（渲染侧 scene/text/present ns 桶进 `[prof]`：`rscene=` `rtext=` `present=`；tick 侧 script/content/other 原有） | **已完成**（2026-09-24）：`RenderEngine::FrameProfile`，文本取 draw_node_text 唯一绘制点，scene = draw_scene 总时长 − 文本；headless 无渲染时段为 0 |
+| §2.1-4 | 场景切换批量预取 | **评估后暂缓**（2026-09-24）：图层文件由 runtime 直写场景、不经宿主事件，唯一发现点是绘制时 `resolve_image`——与事件落地同 tick，落地时投递解码不产生提前量；并行度已由 DecodePool（min(4,核数) worker）在发现点提交。真机转场卡顿的正确杠杆是 `OA_ASYNC_DECODE=1`（解码 20–60ms 移出 tick 线程），待真机像素基线验证后改默认 |
 | — | 脏区渲染（damage rect + scissor + 局部上传） | 未做（P1，需先做驱动 back-buffer 语义实测） |
 | §4 | `-fvisibility=hidden`（OHOS 动态符号面收敛） | **已完成**：`.so` 2.20→1.92MB，内部 C++ dynsym 归零，5 个 dlsym 入口（runner_main / requestShutdown / cleanupSDL / getLastRubyError / get_last_ruby_error）保留 |
 | §4 | `-mcpu`/`-march` 目标 SoC 调优 | 未做（保持通用 arm64 基线：产物要在多机型分发，收益/风险不划算） |

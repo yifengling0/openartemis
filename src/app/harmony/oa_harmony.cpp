@@ -13,6 +13,8 @@
 
 #ifdef __OHOS__
 #include <hilog/log.h>
+
+#include "core/util/trace_sink.h"
 #define OA_ERR(fmt, ...) \
     OH_LOG_Print(LOG_APP, LOG_ERROR, 0xFF00, "openartemis", fmt, ##__VA_ARGS__)
 #define OA_INFO(fmt, ...) \
@@ -56,6 +58,10 @@ int runner_main(int argc, char** argv)
         pfs = root_pfs;
     }
     OA_INFO("runner_main game=%{public}s pfs=%{public}s", game.c_str(), pfs.c_str());
+
+    // M1 结构化 trace（与桌面 main() 对等）：OA_TRACE_JSONL=<path> 开启，
+    // 未设 = 关（零开销）。真机诊断面：hilog 之外的完整事件流落盘。
+    oa::util::Trace::instance().configure(std::getenv("OA_TRACE_JSONL"));
 
     std::vector<std::string> args_store = {
         "openartemis", pfs, "--renderer", "gles", "--platform", "android"

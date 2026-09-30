@@ -42,6 +42,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 struct lua_State;
 
@@ -133,6 +134,15 @@ struct LuaHost {
     std::function<void(int64_t index)> debug_skip_start = [](int64_t) {};
     /// Fields for e:getScriptWaitReason (time/textTween/textClearTween/sound/video).
     std::function<std::map<std::string, std::string>()> get_wait_reason;
+    /// e:getScriptStack 的脚本调用栈（参考引擎语义）：下标 1..n，ss[#ss] =
+    /// 当前执行脚本（无脚本时 file=""），ss[#ss-1] = 直接调用者（[call] 帧）。
+    /// 游戏框架（artemis.lua ReturnStack/releaseStack/StackCount、backlog.lua）
+    /// 对 ss[#ss] 无条件索引，宿主必须保证至少一条。reservedCommands 引擎
+    /// 尚未建模，Lua 侧一律回空表（releaseStack 安全 no-op）。
+    struct ScriptStackFrame {
+        std::string file;
+    };
+    std::function<std::vector<ScriptStackFrame>()> get_script_stack;
 
     // -- clock / platform -----------------------------------------------------
     std::function<uint64_t()> now_ms;
@@ -172,6 +182,17 @@ public:
     lua_State* state() const { return L_; }
     LuaHost& host() { return host_; }
     const LuaHost& host() const { return host_; }
+
+    /// 显式增量 GC 步进（P1 §3.1-2）：把回收工作摊进帧预算。语义同
+    /// lua_gc(L, LUA_GCSTEP, kb)。调用时机由 Interpreter::fire_event 的
+    /// onEnterFrame 之后决定（OA_LUA_GCSTEP_KB 打开才生效）。
+    void gc_step(int kb);
+
+    /// OA_LUA_GCSTEP_KB 的解析值（0 = 关）；构造打印与每帧步进共用。
+    static int gc_step_kb();
+
+    /// 当前 Lua 堆占用（KB，lua_gc(GCCOUNT) 只读）。0 = 无 VM。
+    uint64_t gc_heap_kb() const;
 
     /// Run Lua source in the shared VM.
     void run_code(const std::string& code, const std::string& chunk_name);
@@ -234,6 +255,8 @@ public:
 
 private:
     void install_engine_api();
+    /// 启动期 GC 参数调宽（P1 §3.1-2），构造函数末尾调用一次。
+    void tune_gc();
     /// Push the engine handle userdata onto the stack (the `e` value of
     /// host->Lua calls); engine_ref_ is its anonymous registry anchor.
     void push_engine(lua_State* L) const;
