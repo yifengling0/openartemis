@@ -2858,7 +2858,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // title content appears only ~500 frames after the [stop] park);
     // the longer tail keeps the run alive (the static-frame skip makes those
     // frames cheap when the scene is at rest).
-    if (state->saw_title_init && state->opt.frames_target > 0) {
+    if (state->saw_title_init && state->opt.frames_target > 0 && state->ad_flow.empty()) {
         static bool window_armed = false;
         if (!window_armed) {
             window_armed = true;

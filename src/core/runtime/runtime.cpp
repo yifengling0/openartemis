@@ -557,6 +557,13 @@ void GameRuntime::RuntimeState::open_project(std::string_view platform) {
             return oa::runtime::CallbackResult::Continue;
         }
         pending_events_.push_back(e);
+        // Dispatch numbered saves at the requested continuation, before the
+        // script returns to its UI wait. Loads replace that continuation and
+        // must not run the old stream before the save domain handles them.
+        const auto file = e.params.find("file");
+        if (e.tag == "load" ||
+            (e.tag == "save" && file != e.params.end() && !file->second.empty()))
+            return oa::runtime::CallbackResult::Pause;
         if (e.kind == oa::runtime::Event::Kind::Wait_) {
             return oa::runtime::CallbackResult::Pause;
         }
@@ -952,6 +959,17 @@ void GameRuntime::RuntimeState::tick(uint64_t delta_ms, const FrameInput& in) {
                 if (interpreter_->has_queued_tags() && !queue_click_park) {
                     drain_parked_queue();
                 }
+                // A queued save/load must reach the save domain before any
+                // continuation runs, including a zero-time dispatch wait.
+                const bool save_dispatch_pending = std::any_of(
+                    pending_events_.begin(), pending_events_.end(),
+                    [](const oa::runtime::Event& e) {
+                        const auto file = e.params.find("file");
+                        return e.tag == "load" ||
+                            (e.tag == "save" && file != e.params.end() &&
+                             !file->second.empty());
+                    });
+                if (save_dispatch_pending) break;
                 if (wait_) {
                     attempted_resolve = true;
                     if (resolve_wait(delta_ms, in, clicked)) {
@@ -1054,6 +1072,13 @@ void GameRuntime::RuntimeState::run_until_wait() {
                 default:
                     break;
             }
+        } else if (ev && (ev->tag == "load" || ev->tag == "save")) {
+            // Resume a saved continuation on the next tick. A successful
+            // load replaces this wait; a failed load resumes the old stream.
+            oa::runtime::WaitReason w;
+            w.kind = oa::runtime::WaitReason::Kind::Timed;
+            wait_ = w;
+            wait_remaining_ms_ = 0;
         } else if (ev && ev->kind == oa::runtime::Event::Kind::Trans) {
             // [trans] type!=0: script parks until the transition visually
             // finishes (Wait(Trans) -> Stop{reason:"trans"}).
@@ -1124,6 +1149,11 @@ void GameRuntime::RuntimeState::drain_parked_queue() {
                 if (ev->reason.kind == oa::runtime::WaitReason::Kind::Timed) {
                     wait_remaining_ms_ = ev->reason.milliseconds;
                 }
+            } else if (ev && (ev->tag == "load" || ev->tag == "save")) {
+                oa::runtime::WaitReason w;
+                w.kind = oa::runtime::WaitReason::Kind::Timed;
+                wait_ = w;
+                wait_remaining_ms_ = 0;
             } else if (ev && ev->kind == oa::runtime::Event::Kind::Trans) {
                 arm_stop_wait("trans");
             } else if (ev && ev->kind == oa::runtime::Event::Kind::LayerEventCmd &&
@@ -2187,9 +2217,14 @@ GameRuntime::RuntimeState::PointerConsumption GameRuntime::RuntimeState::process
     auto dispatch_list = [&](const std::vector<std::string>& base,
                              const std::string& event_type) -> std::vector<std::string> {
         std::vector<std::string> out;
+        bool have_top = false;
         for (size_t i = 0; i < base.size(); ++i) {
             const auto* h = scene_.find_event_handler(base[i], event_type);
-            if (h && h->enabled && (i == 0 || h->penetration)) out.push_back(base[i]);
+            if (!h || !h->enabled) continue;
+            // A drag-only thumbnail overlay must not occlude the slot's
+            // rollover. Occlusion is defined for this event type.
+            if (!have_top || h->penetration) out.push_back(base[i]);
+            have_top = true;
         }
         std::reverse(out.begin(), out.end());
         return out;
@@ -2414,7 +2449,8 @@ bool GameRuntime::RuntimeState::dispatch_layer_row(
     // chains, other push handlers) must not arm a marker that would then be
     // claimed by their navigation (stale-marker pattern).
     if (fn_it != params.end() && !fn_it->second.empty() && row.file.empty() &&
-        row.label.empty() && fn_queued) {
+        row.label.empty() && fn_queued &&
+        !(params.count("call") && params.at("call") == "0")) {
         if (std::getenv("OA_SELTRACE")) {
             std::fprintf(stderr,
                          "[seltrace] ROW-FN layer=%s fn=%s kind=%d queued "
@@ -2465,7 +2501,8 @@ bool GameRuntime::RuntimeState::dispatch_input_row(
         handled = true;
     }
     if (fn_it != params.end() && !fn_it->second.empty() && row.file.empty() &&
-        row.label.empty() && fn_queued) {
+        row.label.empty() && fn_queued &&
+        !(params.count("call") && params.at("call") == "0")) {
         if (std::getenv("OA_SELTRACE")) {
             std::fprintf(stderr,
                          "[seltrace] INPUT-FN filter=%s fn=%s key=%s kind=%d "

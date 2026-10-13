@@ -393,6 +393,11 @@ bool GameRuntime::RuntimeState::save_game_to(const std::string& file) {
         data.current_script = *s;
     }
     data.current_line = interpreter_->current_line();
+    const auto* boundary = interpreter_->last_wait_event();
+    // Inline [save] resumes after the instruction. A Lua-queued save has
+    // already consumed its queue row and keeps the underlying script park.
+    if (boundary && boundary->tag == "save" && !interpreter_->last_wait_from_queue())
+        ++data.current_line;
     for (const auto& f : interpreter_->call_stack()) {
         data.call_stack.emplace_back(f.script, f.return_line);
     }
@@ -504,6 +509,15 @@ bool GameRuntime::RuntimeState::preflight_load_position(const oa::runtime::SaveD
     if (!interpreter_) {
         if (why) *why = "no interpreter";
         return false;
+    }
+    // Preload every return target before clearing the live scene. Fresh
+    // runtimes may have loaded the save UI but never the saved story script.
+    for (const auto& frame : data.call_stack) {
+        std::string err;
+        if (!interpreter_->try_load_script(frame.first, &err)) {
+            if (why) *why = "return script '" + frame.first + "' unavailable: " + err;
+            return false;
+        }
     }
     // 空 current_script = "未定位"（合法：只有变量/场景的档）。
     if (data.current_script.empty()) return true;

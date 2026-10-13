@@ -403,9 +403,129 @@ void test_c8_mouse_warp_request() {
     }
 }
 
+
+// Legacy Lua yesno opens a script call, then a call=0 input jumps into its
+// close animation. Its return must reach the yesno caller, not the old
+// dialog stop. Test both input registrations and both user decisions.
+void test_legacy_yesno_continuation() {
+    for (bool keyboard : {false, true}) {
+        for (int decision : {0, 1}) {
+            Harness h(R"(*main
+[call label="save"]
+[stop]
+*save
+[yesno file="save"]
+[if estimate="$t.yesno == 1"]
+[var name="t.saved" data="1"]
+[/if]
+[var name="t.completed" data="1"]
+[return]
+*dialog_open
+[stop]
+[return]
+*dialog_close
+[wait time="32" input="0"]
+[return]
+)");
+            h.run_lua(R"(
+function yesno(e, p)
+    assert(p.file == 'save')
+    e:tag{'var', name='t.yesno', data='0'}
+    e:tag{'lyc2', id='confirm', width='40', height='40', x='60', y='60'}
+    e:tag{'lyevent', id='confirm', type='click', call='0', handler='calllua', ['function']='confirm'}
+    e:tag{'setonpush', key='13', call='0', handler='calllua', ['function']='confirm'}
+    e:tag{'call', label='dialog_open'}
+end
+function confirm(e, p)
+    assert(p.call == '0')
+    e:tag{'var', name='t.yesno', data=decision}
+    e:tag{'jump', label='dialog_close'}
+end
+)");
+            h.run_lua(decision ? "decision=1" : "decision=0");
+            h.warm();
+            check(h.rt->interpreter().variables().get("t.completed") == std::nullopt,
+                  "yesno caller waits for the user's decision");
+            if (keyboard) h.tick(-5, -5, false, false, {13});
+            else h.tick(80, 80, true, true);
+            h.warm(12);
+            const auto& vars = h.rt->interpreter().variables();
+            check(vars.get("t.completed").value_or(oa::runtime::Value::make_int(0)).as_int() == 1,
+                  "call=0 confirmation resumes its caller after the close wait");
+            check(vars.get("t.saved").value_or(oa::runtime::Value::make_int(0)).as_int() == decision,
+                  "only the affirmative decision executes the save branch");
+            check(h.rt->interpreter().call_stack().empty(),
+                  "confirmation leaves no stale dialog return frame");
+        }
+    }
+}
+
+
+void test_immediate_return_stack_projection() {
+    Harness h("*main\n[call file=\"ui.iet\" label=\"main\"]\n[var name=\"t.resumed\" data=\"1\"]\n[stop]\n");
+    h.fs->files["ui.iet"] = "*main\n[call file=\"dialog.iet\" label=\"main\"]\n[stop]\n";
+    h.fs->files["dialog.iet"] = "*main\n[calllua function=\"release_ui\"]\n[stop]\n";
+    h.run_lua(R"(
+function release_ui(e, p)
+    local ss = e:getScriptStack()
+    assert(ss[#ss].file == 'dialog.iet')
+    e:tag{'lyprop', id='unused', alpha='0'}
+    e:tag{'return'}
+    ss = e:getScriptStack()
+    assert(ss[#ss].file == 'ui.iet')
+    e:tag{'return'}
+    ss = e:getScriptStack()
+    assert(ss[#ss].file == 'system/first.iet')
+    projection_ok = 'yes'
+end
+)");
+    h.warm();
+    check(h.lua_string("projection_ok") == "yes",
+          "same Lua callback sees each immediate reserved return");
+    check(h.rt->interpreter().variables().get("t.resumed").has_value(),
+          "two immediate returns unwind the UI and resume its caller");
+    check(h.rt->interpreter().call_stack().empty(),
+          "projecting reserved returns does not double-pop the live stack");
+    h.run_lua(R"(
+function deferred(e, p)
+    e:enqueueTag{'return'}
+    local ss = e:getScriptStack()
+    assert(ss[#ss].file == 'system/first.iet')
+    deferred_ok = 'yes'
+end
+)");
+    h.call_lua("deferred");
+    check(h.lua_string("deferred_ok") == "yes", "deferred queue rows do not alter stack queries");
+}
+
+void test_drag_overlay_does_not_occlude_rollover() {
+    Harness h(R"(*main
+[lyc2 id="1.slot" width="40" height="40" x="60" y="60"]
+[lyevent id="1.slot" over="over_slot" click="slot_click"]
+[lyc2 id="2.drag" width="40" height="40" x="60" y="60" alpha="0" draggable="1"]
+[lyevent id="2.drag" drag="drag_slot"]
+[stop]
+)");
+    h.run_lua(R"(
+function over_slot(e, p) hover_ok = 'yes' end
+function drag_slot(e, p) drag_ok = 'yes' end
+function slot_click(e, p) end
+)");
+    h.warm();
+    h.tick(80, 80);
+    check(h.lua_string("hover_ok") == "yes",
+          "drag-only overlay lets the slot below receive rollover");
+    h.tick(80, 80, true, true);
+    h.tick(82, 80, true, false);
+    check(h.lua_string("drag_ok") == "yes", "thumbnail overlay remains draggable");
+}
+
 } // namespace
 
 int main() {
+    test_legacy_yesno_continuation();
+    test_immediate_return_stack_projection();
+    test_drag_overlay_does_not_occlude_rollover();
     test_c0_row_file_label_navigation();
     test_c1_role0_advance();
     test_c2_exec_skip_mode_event();

@@ -7,7 +7,7 @@
 # not configured.
 # Generic (asset-free) engine tests stay in tests/ (../CMakeLists.txt).
 # See docs/TESTING.md.
-find_package(Freetype CONFIG REQUIRED)
+find_package(Freetype REQUIRED)
 
 # Resource tiering (2026-09): heavy real-game tests are serialized by default
 # (memory-safe on modest machines). Machines with ample RAM can build with

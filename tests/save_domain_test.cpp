@@ -596,11 +596,107 @@ void test_real_dir_store() {
     fs::remove_all(root, ec);
 }
 
+
+// Saves must capture the request, and loads must replace the old stream.
+void test_save_load_dispatch_boundary() {
+    auto store = std::make_shared<MemSaveStore>();
+    auto fs = std::make_shared<MemFs>();
+    fs->files["system.ini"] = project_ini();
+    fs->files["system/first.iet"] = "*main\n[call file=\"story.iet\" label=\"main\"]\n[stop]\n";
+    fs->files["story.iet"] = "*main\n[var name=\"marker\" data=\"before\"]\n[call file=\"ui.iet\" label=\"main\"]\n[var name=\"resumed\" data=\"1\"]\n[@]\n[stop]\n";
+    fs->files["ui.iet"] = "*main\n[save file=\"boundary.dat\"]\n[var name=\"marker\" data=\"after\"]\n[return]\n";
+    oa::runtime::GameRuntime saver(fs);
+    saver.set_save_store(store);
+    saver.open_project("windows");
+    saver.boot_project();
+    saver.tick(16, {});
+    auto bytes = store->read("save/boundary.dat");
+    check(bytes.has_value(), "boundary save is dispatched in the request tick");
+    if (!bytes) return;
+    const auto data = oa::runtime::SaveData::decode(std::string(bytes->begin(), bytes->end()));
+    check(data.local_variables.at("marker").str_val == "before",
+          "save excludes state changes after the request");
+    check(saver.interpreter().variables().get("marker")->str_val == "before",
+          "save continuation waits until dispatch finishes");
+    saver.tick(16, {});
+    saver.tick(16, {});
+    check(saver.interpreter().variables().get("marker")->str_val == "after",
+          "successful save resumes after the dispatch wait");
+
+    auto loader_fs = std::make_shared<MemFs>(*fs);
+    loader_fs->files["system/first.iet"] = "*main\n[load file=\"boundary.dat\"]\n[var name=\"g.old_stream\" data=\"1\"]\n[stop]\n";
+    oa::runtime::GameRuntime loader(loader_fs);
+    loader.set_save_store(store);
+    loader.open_project("windows");
+    loader.boot_project();
+    check(loader.interpreter().get_script("story.iet") == nullptr,
+          "fresh loader has not visited the saved caller");
+    loader.tick(16, {});
+    for (int i = 0; i < 4; ++i) loader.tick(16, {});
+    check(!loader.interpreter().variables().get("g.old_stream"),
+          "load never executes the replaced script continuation");
+    check(loader.interpreter().variables().get("resumed").has_value(),
+          "load preloads and returns to the saved story caller");
+    check(loader.current_wait() &&
+              loader.current_wait()->kind == oa::runtime::WaitReason::Kind::Generic,
+          "loaded story reaches its input wait without resaving");
+    const auto after_load = store->read("save/boundary.dat");
+    check(after_load == bytes, "load resumes after inline save instead of repeating it");
+
+    // Lua queues can request a save while a script is parked at [stop].
+    auto queued_fs = std::make_shared<MemFs>();
+    queued_fs->files["system.ini"] = project_ini();
+    queued_fs->files["system/first.iet"] = "*main\n[stop]\n";
+    oa::runtime::GameRuntime queued(queued_fs);
+    queued.set_save_store(store);
+    queued.open_project("windows");
+    queued.boot_project();
+    queued.tick(16, {});
+    queued.interpreter().set_variable("marker", oa::runtime::Value::make_string("before"));
+    queued.interpreter().enqueue_tag("save", {{"file", "queued.dat"}});
+    queued.interpreter().enqueue_tag("var", {{"name", "marker"}, {"data", "after"}});
+    queued.tick(16, {});
+    const auto queued_bytes = store->read("save/queued.dat");
+    check(queued_bytes.has_value(), "parked Lua-queue save reaches dispatch");
+    if (queued_bytes) {
+        const auto saved = oa::runtime::SaveData::decode(std::string(queued_bytes->begin(), queued_bytes->end()));
+        check(saved.local_variables.at("marker").str_val == "before",
+              "queued continuation cannot run before save dispatch");
+    }
+    queued.tick(16, {});
+    check(queued.interpreter().variables().get("marker")->str_val == "after",
+          "parked queued save resumes the remaining rows");
+
+    // A missing file does not permanently pause its caller.
+    queued_fs->files["system/first.iet"] = "*main\n[load file=\"missing.dat\"]\n[var name=\"failed_resume\" data=\"1\"]\n[stop]\n";
+    oa::runtime::GameRuntime failed(queued_fs);
+    failed.set_save_store(store);
+    failed.open_project("windows");
+    failed.boot_project();
+    failed.tick(16, {});
+    check(!failed.interpreter().variables().get("failed_resume"),
+          "failed load still observes the dispatch boundary");
+    failed.tick(16, {});
+    failed.tick(16, {});
+    check(failed.interpreter().variables().get("failed_resume").has_value(),
+          "failed load resumes the original stream after dispatch");
+
+    auto broken = data;
+    broken.call_stack.emplace_back("absent-caller.iet", 0);
+    const auto doc = broken.encode();
+    store->write("save/broken-stack.dat", std::vector<uint8_t>(doc.begin(), doc.end()));
+    check(loader.load_game("broken-stack.dat", -1) == oa::runtime::LoadResult::PositionUnavailable,
+          "missing saved caller fails during preflight");
+    check(loader.interpreter().variables().get("resumed").has_value() && loader.current_wait(),
+          "failed caller preflight preserves the live story");
+}
+
 } // namespace
 
 int main() {
     test_syssave_sysload();
     test_numbered_save_load();
+    test_save_load_dispatch_boundary();
     test_screenshots_and_files();
     test_formats();
     test_real_dir_store();

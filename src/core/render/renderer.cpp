@@ -17,6 +17,18 @@
 // 同构搬移；gles 实现 backend_gles.cpp = 原生 GLES 线）。除类型层替换与
 // create_renderer 的后端名参数外，逻辑/顺序/参数与引擎原本逐行等价。
 
+namespace {
+bool skip_transparent_draws() {
+    // Diagnostic A/B switch; ordinary alpha-over content at zero opacity
+    // cannot affect the target. Group compositing keeps its own blend rules.
+    static const bool enabled = [] {
+        const char* value = std::getenv("OA_SKIP_TRANSPARENT");
+        return !(value && std::strcmp(value, "0") == 0);
+    }();
+    return enabled;
+}
+} // namespace
+
 namespace oa::render {
 
 RenderEngine::RenderEngine(oa::fs::IFileSystem* fs, oa::runtime::GameRuntime* rt) : fs_(fs), rt_(rt)
@@ -450,7 +462,7 @@ size_t RenderEngine::draw_node_text(const oa::render::Layer& node,
     // resolved once per frame in draw_scene (frame_node_messages_), so this
     // draw point stays a pure slot lookup — membership and visibility are
     // unchanged because scene/text state cannot change during a draw.
-    if (!backend_) return 0;
+    if (!backend_ || (opacity <= 0.0 && skip_transparent_draws())) return 0;
     size_t drawn = 0;
     const auto it = frame_node_messages_.find(node.id);
     if (it == frame_node_messages_.end()) return 0;
@@ -1506,8 +1518,10 @@ size_t RenderEngine::draw_one(const oa::render::Layer& l, const oa::render::Affi
     // solid_content(file 空 && has_color && w/h>0)与原纯色分支同门(原
     // 条件逐字搬入 content_role.h),textured_content(file 非空)与
     // 原纹理分支同门;两门互斥,顺序调整不改变任何状态的判定与像素输出。
+    if (op <= 0.0 && skip_transparent_draws()) return 0;
     const oa::render::ContentRole& role = oa::render::content_role_of(l);
     if (role.solid_content(l)) {
+        if (l.solid_rgba[3] == 0 && skip_transparent_draws()) return 0;
         // lyc solid-color quad (file-less) sized by width/height
         if (t.is_plain_translation()) {
             backend_->set_draw_blend(BlendMode::Blend);

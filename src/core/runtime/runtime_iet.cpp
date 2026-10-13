@@ -1318,6 +1318,11 @@ void Interpreter::restore_position(const std::string& script, size_t line,
     if (!script.empty() && !scripts_.count(script)) {
         load_external_script(script);
     }
+    // A fresh process has not visited the saved callers yet. Returning to
+    // an unloaded frame otherwise looks like script completion and stalls.
+    for (const auto& frame : stack) {
+        if (!frame.script.empty()) load_external_script(frame.script);
+    }
     if (script.empty()) {
         current_script_name_.reset();
     } else {
@@ -1937,6 +1942,17 @@ static TagOutcome execute_tag(Interpreter& it, const Instruction& ins, bool appl
     }
 
     if (tag == "yesno" || tag == "dialog") {
+        // Older iMel games implement their image confirmation dialog in the
+        // global yesno(e, params) callback, rather than tags.yesno. The file
+        // argument selects that dialog (save/save2/load/etc.). Let it queue
+        // its UI and waits before the script tests t.yesno; treating this as
+        // a completed host notice silently skips every save and load.
+        if (tag == "yesno" && ins.get("file") && it.hooks().call_lua_function) {
+            std::map<std::string, std::string> params;
+            for (const auto& [k, v] : ins.params) params[k] = eval.resolve_param_str(v);
+            if (it.hooks().call_lua_function("yesno", params, *it.current_script(), ins.line))
+                return out;
+        }
         // The host dialog/yesno/textfield widget is a host-side surface the
         // engine does not draw itself.
         // Until a real host UI exists, complete dialogs LOGICALLY so
@@ -2448,6 +2464,19 @@ oa::runtime::LuaHost Interpreter::build_lua_host() {
         for (const CallFrame& f : call_stack_) frames.push_back({f.script});
         frames.push_back(
             {current_script_name_ ? *current_script_name_ : std::string()});
+        // e:tag returns are immediate reserved commands. Legacy frameworks
+        // inspect the stack again in the same Lua callback to release the
+        // next UI frame; expose those pending unwinds without mutating the
+        // live interpreter before its queue drain. Deferred enqueueTag rows
+        // and a new call/jump do not belong to this unwind projection.
+        for (size_t i = 0; i < immediate_tag_count_ && i < tag_queue_.size(); ++i) {
+            const auto& tag = tag_queue_[i].tag;
+            if (tag == "call" || tag == "jump" || tag == "wait" ||
+                tag == "stop" || tag == "@" || tag == "wt" || tag == "wt0" ||
+                tag == "trans" || tag == "load" || tag == "save")
+                break;
+            if (tag == "return" && frames.size() > 1) frames.pop_back();
+        }
         return frames;
     };
     host.now_ms = [this] { return now_ms(); };

@@ -1170,6 +1170,11 @@ void Compositor::apply_lyevent(const std::string& id,
         if (!known) extra[k] = v;
     }
 
+    // Lua handlers also consume call (legacy setonpush_call distinguishes a
+    // call from a jump). Preserve an explicit zero as well as one; omitting
+    // it changes both that helper and the runtime's return-frame policy.
+    if (raw.count("call")) extra["call"] = get("call");
+
     ensure_path(id);
     Layer* layer = find_mut(id);
     if (!layer) return;
@@ -1252,6 +1257,7 @@ void Compositor::set_input_handler(const std::string& event_name,
     for (const auto& [k, v] : raw) {
         if (k != "file" && k != "label" && k != "call" && k != "handler") extra[k] = v;
     }
+    if (raw.count("call")) extra["call"] = get("call");
     const std::string key = extra.count("key") ? extra.at("key") : std::string();
     InputHandler row;
     row.file = file;

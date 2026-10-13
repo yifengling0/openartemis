@@ -3,7 +3,7 @@
 //
 // TEST-ONLY: deterministic windowed UI journeys (OA_AUTODRIVE=exit|title|help|
 // conf|r10save|r10t|r10blog|qld|d38|nmfg|scale|fontscan|kdemote|langidle|
-// slnywalk), synthetic-input
+// slnywalk|gzsqsave|gzsqload), synthetic-input
 // probes, pixel metrics and the evidence dumps. The plain user binary never
 // compiles this file. main.cpp / main_test.cpp keep only the small
 // #if OA_TEST_BUILD hooks that call into this TU (ad_drive / ad_pre_tick /
@@ -5819,7 +5819,180 @@ static bool ad_slnywalk_drive(AppState* s) {
     return false;
 }
 
+// Old iMel UI uses com= button identifiers and F2/F3, unlike FPM's key=.
+// gzsqsave creates slot 1 in a fresh OA_SAVE_ROOT; gzsqload starts a fresh
+// process with that same root and loads it through the title UI.
+static bool ad_gzsq_drive(AppState* s) {
+    auto* rt = s->rt.get();
+    const bool loading = s->ad_flow == "gzsqload";
+    const bool continuing = loading && std::getenv("OA_GZSQ_CONTINUE");
+    auto find = [&](const char* com) -> const oa::render::Layer* {
+        for (auto* l : rt->scene().draw_order()) {
+            const auto* h = rt->scene().find_event_handler(l->id, "click");
+            if (!h || !h->enabled) continue;
+            const auto k = h->params.find("com");
+            if (k != h->params.end() && k->second == com) return l;
+        }
+        return nullptr;
+    };
+    auto hover = [&](const char* com) {
+        if (auto* l = find(com)) {
+            ad_click_layer(s, l);
+            s->ad_click = false;
+            s->ad_hover = true;
+        }
+    };
+    auto page = [&] {
+        std::string text;
+        if (const auto* ml = rt->text().layer("adv"))
+            for (const auto& u : ml->page) text += u.data;
+        return text;
+    };
+    auto shot = [&](const char* phase) {
+        oa::media::Image img;
+        std::filesystem::create_directories(s->ad_out);
+        if (s->oaRender->snapshot_renderer(img)) {
+            const auto png = oa::media::encode_png(uint32_t(img.w), uint32_t(img.h), img.rgba);
+            const auto path = std::filesystem::path(s->ad_out) / (std::string(phase) + ".png");
+            if (FILE* f = std::fopen(path.string().c_str(), "wb")) {
+                std::fwrite(png.data(), 1, png.size(), f);
+                std::fclose(f);
+            }
+        }
+        const auto text = page();
+        const auto path = std::filesystem::path(s->ad_out) / (std::string(phase) + ".txt");
+        if (FILE* f = std::fopen(path.string().c_str(), "wb")) {
+            std::fwrite(text.data(), 1, text.size(), f);
+            std::fclose(f);
+        }
+        std::printf("[gzsq] %s f=%llu script=%s:%zu text=%s\n", phase,
+                    (unsigned long long)s->frames,
+                    rt->interpreter().current_script() ? rt->interpreter().current_script()->c_str() : "-",
+                    rt->interpreter().current_line(), text.c_str());
+    };
+    auto fail = [](const char* reason) {
+        std::fprintf(stderr, "[gzsq] FAIL: %s\n", reason);
+        std::exit(1);
+    };
+    // Matched stable phases for OA_SKIP_TRANSPARENT A/B runs. These are
+    // renderer counters, excluding screenshot/readback and UI transitions.
+    struct PerfPoint {
+        uint64_t frames, draws, batches, tick_us, scene_ns, present_ns;
+    };
+    auto perf_point = [&] {
+        const auto& rs = s->oaRender->render_stats();
+        const auto& tp = rt->tick_profile();
+        const auto& fp = s->oaRender->frame_profile();
+        return PerfPoint{s->frames, rs.draw_calls, rs.batches,
+                         tp.script_us + tp.content_us + tp.other_us,
+                         fp.scene_ns, fp.present_ns};
+    };
+    static PerfPoint perf_begin{};
+    if (!loading && s->ad_stage == 2) {
+        if (s->ad_stage_f == 60 || s->ad_stage_f == 245 || s->ad_stage_f == 620)
+            perf_begin = perf_point();
+        if (s->ad_stage_f == 119 || s->ad_stage_f == 269 || s->ad_stage_f == 719) {
+            const auto end = perf_point();
+            const double frames = double(end.frames - perf_begin.frames);
+            std::printf("[gzsq-perf] %s frames=%.0f draws/f=%.2f batches/f=%.2f "
+                        "tick=%.3fms scene=%.3fms present=%.3fms\n",
+                        s->ad_stage_f == 119 ? "slots" : s->ad_stage_f == 269 ? "dialog" : "resumed-story",
+                        frames, (end.draws - perf_begin.draws) / frames,
+                        (end.batches - perf_begin.batches) / frames,
+                        (end.tick_us - perf_begin.tick_us) / frames / 1000.0,
+                        (end.scene_ns - perf_begin.scene_ns) / frames / 1e6,
+                        (end.present_ns - perf_begin.present_ns) / frames / 1e6);
+        }
+    }
+    if (s->frames > 5000) fail("UI journey timed out");
+    switch (s->ad_stage) {
+    case 0:
+        if (ad_wait_stop(rt->current_wait()) && s->ad_stage_f > 90) {
+            if (auto* l = find(loading ? (continuing ? "bt_cont" : "bt_load") : "bt_start")) {
+                shot("title");
+                ad_click_layer(s, l);
+                s->ad_stage = 1;
+                s->ad_stage_f = 0;
+            }
+        }
+        break;
+    case 1:
+        if (continuing) {
+            if (s->ad_stage_f > 120 && !page().empty()) { s->ad_stage = 3; s->ad_stage_f = 0; }
+            break;
+        }
+        if (!loading) {
+            if (s->ad_stage_f == 240) shot("story");
+            if (s->ad_stage_f > 360 && s->ad_stage_f % 120 == 0) s->ad_press_key = 113;
+            if (s->ad_stage_f % 90 == 0) s->ad_press_key = 13;
+        }
+        if ((loading || s->ad_stage_f > 500) && find("bt_save01")) {
+            s->ad_sample_page = page();
+            shot("save-point");
+            s->ad_stage = 2;
+            s->ad_stage_f = 0;
+        }
+        break;
+    case 2:
+        if (s->ad_stage_f == 100) { s->ad_hover = true; s->ad_cx = 20; s->ad_cy = 20; }
+        if (s->ad_stage_f == 120) {
+            shot("slots");
+            hover("bt_save01");
+        }
+        if (s->ad_stage_f == 150) {
+            if (loading) s->ad_press_key = 13;
+            else if (auto* l = find("bt_save01")) ad_click_layer(s, l);
+        }
+        if (s->ad_stage_f == 240) shot("dialog");
+        // The game's automatic pointer warp finishes before btn_start. Move
+        // away/back after it so the real rollover establishes btn_cursor.
+        if (s->ad_stage_f == 270) { s->ad_hover = true; s->ad_cx = 20; s->ad_cy = 20; }
+        if (s->ad_stage_f == 280) hover("bt_yes");
+        if (s->ad_stage_f == 300) if (auto* l = find("bt_yes")) ad_click_layer(s, l);
+        if (s->ad_stage_f == 540) {
+            shot(loading ? "loaded" : "saved");
+            if (!loading) {
+                const auto root = std::getenv("OA_SAVE_ROOT");
+                if (!root) fail("OA_SAVE_ROOT required for isolated save verification");
+                for (const char* file : {"AiyokunoEustia0001.dat", "AiyokunoEustia0001.png",
+                                         "AiyokunoEustia0001_l.png", "global.dat"}) {
+                    const auto path = std::filesystem::path(root) / "savedata" / file;
+                    if (!std::filesystem::exists(path) || std::filesystem::file_size(path) == 0)
+                        fail("slot data, thumbnails or global index missing");
+                }
+            } else {
+                if (page().empty() || page().find("NoData") != std::string::npos)
+                    fail("load did not restore a story page");
+                s->ad_sample_page = page();
+                s->ad_press_key = 13;
+            }
+        }
+        if (s->ad_stage_f == 600 && loading) s->ad_press_key = 13;
+        if (s->ad_stage_f == 720) {
+            if (loading) {
+                shot("continued");
+                if (page().empty() || page() == s->ad_sample_page) fail("loaded story cannot advance");
+            }
+            std::printf("[gzsq] PASS %s\n", loading ? "load and continue" : "save slot and thumbnails");
+            s->quit = true;
+            return true;
+        }
+        break;
+    case 3:
+        if (s->ad_stage_f == 120) { shot("loaded"); s->ad_sample_page = page(); }
+        if (s->ad_stage_f == 180 || s->ad_stage_f == 240) s->ad_press_key = 13;
+        if (s->ad_stage_f == 360) {
+            shot("continued");
+            if (page().empty() || page() == s->ad_sample_page) fail("continue load cannot advance");
+            std::printf("[gzsq] PASS continue load and advance\n"); s->quit = true; return true;
+        }
+        break;
+    }
+    return false;
+}
+
 bool ad_drive(AppState* s) {
+    if ((s->ad_flow == "gzsqsave" || s->ad_flow == "gzsqload")) { ++s->ad_stage_f; return ad_gzsq_drive(s); }
     oa::runtime::GameRuntime* rt = s->rt.get();
     ++s->ad_stage_f;
 #if OA_TEST_BUILD

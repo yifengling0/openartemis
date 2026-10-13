@@ -69,8 +69,15 @@ if(OHOS)
     VERBATIM)
   # 出厂 strip：.so 从 ~24MB 降到 ~7MB（dlopen 更快）；未裁剪副本留在
   # libopenartemis.unstripped.so 供崩溃符号化。
-  get_filename_component(_oa_ndk_llvm_bin "${CMAKE_TOOLCHAIN_FILE}/../../llvm/bin" ABSOLUTE)
-  find_program(OA_LLVM_STRIP NAMES llvm-strip.exe llvm-strip HINTS "${_oa_ndk_llvm_bin}")
+  get_filename_component(_oa_toolchain_dir "${CMAKE_TOOLCHAIN_FILE}" DIRECTORY)
+  get_filename_component(_oa_ndk_llvm_bin "${_oa_toolchain_dir}/../../llvm/bin" ABSOLUTE)
+  if(CMAKE_STRIP AND EXISTS "${CMAKE_STRIP}")
+    # Prefer the toolchain tool. WSL PATH may also contain a Windows strip
+    # executable, which cannot safely rewrite an ext4 output file in place.
+    set(OA_LLVM_STRIP "${CMAKE_STRIP}")
+  else()
+    find_program(OA_LLVM_STRIP NAMES llvm-strip llvm-strip.exe HINTS "${_oa_ndk_llvm_bin}")
+  endif()
   if(OA_LLVM_STRIP)
     add_custom_command(TARGET openartemis POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:openartemis>" "$<TARGET_FILE:openartemis>.unstripped"

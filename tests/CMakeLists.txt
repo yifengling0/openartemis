@@ -4,7 +4,12 @@
 # no real game assets required). Tests that need a real Artemis game archive
 # (root.pfs / an extracted project tree) live in tests/fpm/ and are wired in
 # by add_subdirectory(fpm) at the bottom — see docs/TESTING.md.
-find_package(Vorbis CONFIG REQUIRED)
+find_package(Vorbis CONFIG QUIET)
+if(NOT TARGET Vorbis::vorbisenc)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(OA_TEST_VORBISENC REQUIRED IMPORTED_TARGET vorbisenc)
+  add_library(Vorbis::vorbisenc ALIAS PkgConfig::OA_TEST_VORBISENC)
+endif()
 
 add_executable(ini_project_test ini_project_test.cpp)
 target_link_libraries(ini_project_test PRIVATE libopenartemis)
@@ -153,7 +158,12 @@ set_tests_properties(audio_latency_bound PROPERTIES SKIP_RETURN_CODE 77)
 
 # research/100: `_m` mask-partner engine tests (asset-free synthetic theora
 # pair; tests/theora_fixture.h encodes with libtheoraenc at test time).
-find_package(unofficial-theora CONFIG REQUIRED)
+find_package(unofficial-theora CONFIG QUIET)
+if(NOT TARGET unofficial::theora::theoraenc)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(OA_TEST_THEORAENC REQUIRED IMPORTED_TARGET theoraenc)
+  add_library(unofficial::theora::theoraenc ALIAS PkgConfig::OA_TEST_THEORAENC)
+endif()
 add_executable(video_mask_test video_mask_test.cpp)
 target_link_libraries(video_mask_test PRIVATE libopenartemis unofficial::theora::theoraenc)
 add_test(NAME video_mask_test COMMAND video_mask_test)
@@ -166,7 +176,7 @@ set_tests_properties(save_domain_test PROPERTIES ENVIRONMENT "OA_TEST_FPM_PFS=${
 # U15: save-area image read-back (slot thumbnails) routes through the
 # runtime SaveStore, so plain runs (default ./save) can display [savess]
 # PNGs without OA_SAVE_ROOT. RenderEngine pulls font.cpp's FreeType calls.
-find_package(Freetype CONFIG REQUIRED)
+find_package(Freetype REQUIRED)
 add_executable(save_thumb_readback_test save_thumb_readback_test.cpp)
 target_link_libraries(save_thumb_readback_test PRIVATE libopenartemis Freetype::Freetype)
 add_test(NAME save_thumb_readback COMMAND save_thumb_readback_test)
