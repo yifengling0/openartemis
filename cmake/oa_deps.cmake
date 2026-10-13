@@ -219,6 +219,9 @@ else()
   if(WIN32)
     target_link_libraries(oa_deps INTERFACE
       opengl32 ole32 oleaut32 imm32 winmm version setupapi rpcrt4 advapi32 shell32 uuid)
+  elseif(UNIX)
+    pkg_check_modules(OA_GLES REQUIRED IMPORTED_TARGET glesv2 egl)
+    target_link_libraries(oa_deps INTERFACE PkgConfig::OA_GLES ${CMAKE_DL_LIBS} m)
   endif()
 endif()
 
