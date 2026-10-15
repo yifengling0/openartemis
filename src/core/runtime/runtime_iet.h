@@ -503,6 +503,7 @@ public:
                                std::map<std::string, std::string> params);
     /// Whether the tag queue holds pending tags.
     bool has_queued_tags() const { return !tag_queue_.empty(); }
+    bool has_immediate_tags() const { return immediate_tag_count_ != 0; }
     /// First `n` queued tags in FIFO order (diagnostics only).
     std::vector<Instruction> peek_tag_queue(size_t n) const {
         std::vector<Instruction> out;
@@ -513,9 +514,10 @@ public:
     /// Drain ONLY the queued tags (no inline script stepping). Returns Wait
     /// when a queued tag paused the interpreter (parked-wait drains
     /// run queued tags only, no inline stepping); Completed when the queue
-    /// emptied without a
-    /// pause. Queued jump/call/return tags change the interpreter position.
-    ExecutionResult run_queued();
+    /// emptied without a pause. With immediate_only, stop before the deferred
+    /// continuation (a queue-sourced click may still be holding that tail).
+    /// Queued jump/call/return tags change the interpreter position.
+    ExecutionResult run_queued(bool immediate_only = false);
     /// Queued-drain shape flags:
     /// saw_call/saw_jump set while run_queued executes one queued tag of
     /// that kind; consumed by the runtime's inline-event-frame settle after
@@ -617,7 +619,7 @@ private:
     /// scenarios via boot()/start()/the file_loader hook only ("small
     /// interface").
     void load_external_script(const std::string& file);
-    std::optional<ExecutionResult> flush_tag_queue();
+    std::optional<ExecutionResult> flush_tag_queue(bool immediate_only = false);
     /// Release the deferred continuations of queued calls whose frames have
     /// returned (FIFO, appended after anything the callee left queued).
     void restore_completed_queued_barriers();

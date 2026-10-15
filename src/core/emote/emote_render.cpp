@@ -1395,10 +1395,12 @@ bool emote_collect_parts(const EmoteFile& file, const std::map<std::string, doub
                          int canvasW, int canvasH, const StaticRenderOptions& opt,
                          std::vector<EmoteDrawPart>* parts, std::string* err) {
     if (canvasW <= 0 || canvasH <= 0) return false;
-    parts->clear();
     std::vector<DrawEntry> entries;
-    if (!evaluate_entries(file, vars, &entries, err)) return false;
-    if (entries.empty()) return true;
+    if (!evaluate_entries(file, vars, &entries, err)) {
+        parts->clear();
+        return false;
+    }
+    if (entries.empty()) { parts->clear(); return true; }
 
     // content bounds (identical rules to the eval-time ctx bounds)
     //

@@ -661,6 +661,7 @@ void GameRuntime::RuntimeState::apply_emote_static(const oa::runtime::Event& e) 
         return;
     }
     auto player = std::make_shared<oa::emote::EmotePlayer>();
+    player->set_external_pose(emote_external_pose_);
     std::string err;
     if (!player->load(*bytes, w, h, &err)) {
         if (std::getenv("OA_EMOTE_DEBUG"))
@@ -783,7 +784,7 @@ bool GameRuntime::RuntimeState::emote_method_dispatch(const std::string& id, con
         // as n1 (string-first method family, runtime_lua.cpp).
         p.play_timeline(s, int(n1));
     } else if (method == "fadeInTimeline") {
-        p.fade_in_timeline(s);
+        p.fade_in_timeline(s, n1, n2);
     } else if (method == "stopTimeline") {
         // stop the named timeline when it plays (fg match =
         // pass — internal end, pose kept; idle match = stop — the delta
@@ -793,12 +794,7 @@ bool GameRuntime::RuntimeState::emote_method_dispatch(const std::string& id, con
         // parallel foreground entries).
         p.stop_timeline(s);
     } else if (method == "fadeOutTimeline") {
-        // 甜蜜女友3 e-mote.lua:309: the named timeline fades
-        // out (always-animation switch with a fade > 0). Fade/ratio math is
-        // not implemented (no official SDK basis), so the
-        // structural part is: end that slot like stopTimeline does (fg ->
-        // pass, idle -> stop), leaving the persistent pose untouched.
-        p.stop_timeline(s);
+        p.fade_out_timeline(s, n1, n2);
     } else if (method == "stop") {
         p.stop(); // freeze at the current pose, drop both timeline slots
     } else if (method == "pass") {
@@ -808,7 +804,7 @@ bool GameRuntime::RuntimeState::emote_method_dispatch(const std::string& id, con
     } else if (method == "skip") {
         p.skip();
     } else if (method == "setVariable") {
-        p.set_variable(s, n1);
+        p.set_variable(s, n1, n2, n3);
     } else if (method == "getVariable") {
         if (out) *out = p.get_variable(s);
         return true;

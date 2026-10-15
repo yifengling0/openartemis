@@ -151,6 +151,9 @@ struct AppState
     std::map<std::string, uint64_t> layer_video_rev; // layer id -> uploaded rev
     // emote static frames (layer id -> uploaded revision).
     std::map<std::string, uint64_t> layer_emote_rev;
+    // uid disambiguates layer deletion/recreation with the same revision.
+    std::map<std::string, uint64_t> layer_emote_uid;
+    std::map<std::string, std::vector<oa::emote::EmoteDrawPart>> layer_emote_parts;
 
 #if OA_TEST_BUILD
     // ---- auto-drive (OA_AUTODRIVE=exit|title|help|conf) -------------------

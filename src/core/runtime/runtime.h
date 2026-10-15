@@ -315,6 +315,9 @@ public:
         std::shared_ptr<oa::emote::EmotePlayer> player;
     };
     const std::map<std::string, EmoteLayerState>& emote_layers() const;
+    /// Host capability, installed before the first script tick. Headless
+    /// runtimes keep CPU rendering; GPU hosts avoid even the load-time raster.
+    void set_emote_external_pose(bool enabled);
     size_t emote_layer_events() const;
     oa::media::MediaPlayers& media_players();
     /// Override the media asset loader (defaults to the project filesystem +

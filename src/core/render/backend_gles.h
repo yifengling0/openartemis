@@ -115,6 +115,7 @@ private:
                       const float* verts, int nverts);
     void flush_batch(); // 上传并绘制累积批次（空批次 no-op）
     std::vector<float> batch_;
+    std::vector<float> geometry_scratch_;
     const GlesTexture* batch_tex_ = nullptr;
     BlendMode batch_blend_ = BlendMode::Blend;
     bool batch_clip_on_ = false;

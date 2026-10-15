@@ -24,6 +24,7 @@ struct OggVorbis_File;
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace oa::media {
@@ -260,9 +261,9 @@ public:
     }
 
     /// Attach the decode pool (optional). When present, active channels
-    /// decode ahead on pool workers (byte-identical source frames; the
-    /// mixer still runs on the caller's thread and falls back to the
-    /// synchronous path whenever the worker lags). Null = plain
+    /// decode ahead on workers. The mixer and worker share one decoder;
+    /// if the worker lags, the mixer continues that decoder in place.
+    /// Null = plain
     /// synchronous decode (headless/tests stay byte-identical).
     void set_decode_pool(DecodePool* pool) { pool_ = pool; }
 
@@ -376,6 +377,10 @@ public:
             size_t consumed = 0;     // frames the mixer already took
             bool eof = false;        // worker reached end of the file
             bool cancel = false;     // player replaced/stopped: exit the worker
+            std::unique_ptr<Player> decoder; // protected by mu, no second decoder
+#if !defined(__EMSCRIPTEN__)
+            std::thread worker; // joined before the loader/runtime can be destroyed
+#endif
         };
         std::shared_ptr<Prefetch> prefetch;
     };
@@ -385,6 +390,7 @@ private:
     std::function<std::optional<std::vector<uint8_t>>(const std::string&)> loader_;
     DecodePool* pool_ = nullptr; // optional decode-pool worker host
     AudioSink* sink_ = nullptr;
+    std::vector<float> mix_; // reusable interleaved output block
     double out_frame_frac_ = 0.0; // sub-frame accumulator of the output clock
     uint64_t paced_out_ticks_ = 0; // latency-drain ticks
     // two-sided pacer state.

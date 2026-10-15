@@ -16,6 +16,7 @@
 // core/media/audio.h, see its banner.)
 // (same shape as render/render_internal.h.)
 #include <cstdint>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -459,7 +460,7 @@ public:
     }
     /// how often the bound had to drop a standing backlog.
     uint64_t resyncs(int source) const {
-        return (source >= 0 && source < kStreamCount) ? resyncs_[source] : 0;
+        return (source >= 0 && source < kStreamCount) ? resyncs_[source].load(std::memory_order_relaxed) : 0;
     }
     /// negative control: disable the bound (ratcheting
     /// behaviour) so a test can prove it distinguishes fixed from unfixed.
@@ -472,11 +473,11 @@ public:
     /// while that stream has been pushed to within the last 250 ms (an idle
     /// stream is empty by definition, not starved).
     uint64_t underruns(int source) const {
-        return (source >= 0 && source < kStreamCount) ? underruns_[source] : 0;
+        return (source >= 0 && source < kStreamCount) ? underruns_[source].load(std::memory_order_relaxed) : 0;
     }
-    uint64_t device_callbacks() const { return device_callbacks_; }
+    uint64_t device_callbacks() const { return device_callbacks_.load(std::memory_order_relaxed); }
     void note_push(int source) {
-        if (source >= 0 && source < kStreamCount) last_push_ms_[source] = SDL_GetTicks();
+        if (source >= 0 && source < kStreamCount) last_push_ms_[source].store(SDL_GetTicks(), std::memory_order_relaxed);
     }
     /// Body of the post-mix hook (audio.cpp): counts the drained-dry events.
     void note_device_pull(const SDL_AudioSpec* spec, int buflen);
@@ -557,12 +558,12 @@ private:
     }
     SDL_AudioDeviceID device_ = 0;
     SDL_AudioStream* stream_[kStreamCount] = {};
-    uint64_t resyncs_[kStreamCount] = {};
+    std::atomic<uint64_t> resyncs_[kStreamCount] = {};
     size_t device_frames_ = 0; // one device callback's worth
     bool bound_ = true; // OA_AUDIO_NO_BOUND / set_bound_enabled(false)
-    uint64_t underruns_[kStreamCount] = {};   // drained-dry count
-    uint64_t device_callbacks_ = 0;           // post-mix callbacks
-    uint64_t last_push_ms_[kStreamCount] = {}; // "stream is live"
+    std::atomic<uint64_t> underruns_[kStreamCount] = {};
+    std::atomic<uint64_t> device_callbacks_{0};
+    std::atomic<uint64_t> last_push_ms_[kStreamCount] = {}; // "stream is live"
 #ifdef OA_USE_SDL2
     mutable std::mutex mutex_;
     SDL_AudioSpec device_spec_{};

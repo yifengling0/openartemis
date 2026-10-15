@@ -24,6 +24,10 @@ add_executable(decode_pool_test decode_pool_test.cpp)
 target_link_libraries(decode_pool_test PRIVATE libopenartemis)
 add_test(NAME decode_pool_test COMMAND decode_pool_test)
 
+add_executable(audio_window_test audio_window_test.cpp)
+target_link_libraries(audio_window_test PRIVATE libopenartemis Vorbis::vorbisenc)
+add_test(NAME audio_window COMMAND audio_window_test)
+
 add_executable(lua_smoke_test lua_smoke_test.cpp)
 target_link_libraries(lua_smoke_test PRIVATE libopenartemis lua51)
 add_test(NAME lua_smoke_test COMMAND lua_smoke_test)
@@ -203,5 +207,15 @@ add_executable(save_compat_test save_compat_test.cpp)
 target_link_libraries(save_compat_test PRIVATE libopenartemis lua51)
 add_test(NAME save_compat_test COMMAND save_compat_test)
 
-# Real-game-asset tests (need OA_TEST_FPM_PFS; see docs/TESTING.md).
+# Asset-free e-mote timing and GPU compositing contracts.
+add_executable(emote_semantics_test emote_semantics_test.cpp)
+target_link_libraries(emote_semantics_test PRIVATE libopenartemis)
+add_test(NAME emote_semantics COMMAND emote_semantics_test)
+
+add_executable(emote_gpu_test emote_gpu_test.cpp)
+target_link_libraries(emote_gpu_test PRIVATE libopenartemis)
+add_test(NAME emote_gpu COMMAND emote_gpu_test)
+set_tests_properties(emote_gpu PROPERTIES SKIP_RETURN_CODE 77)
+
+# Real-game-asset tests (see docs/TESTING.md for asset environment variables).
 add_subdirectory(fpm)

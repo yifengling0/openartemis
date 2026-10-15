@@ -171,6 +171,11 @@ struct GameRuntime::RuntimeState {
         return emote_layers_;
     }
     size_t emote_layer_events() const { return emote_layer_events_; }
+    void set_emote_external_pose(bool enabled) {
+        emote_external_pose_ = enabled;
+        for (auto& [id, state] : emote_layers_)
+            if (state.player) state.player->set_external_pose(enabled);
+    }
     oa::media::MediaPlayers& media_players() { return *media_players_; }
     void set_media_loader(
         std::function<std::optional<std::vector<uint8_t>>(const std::string&)> loader) {
@@ -379,6 +384,7 @@ struct GameRuntime::RuntimeState {
     std::unique_ptr<oa::media::DecodePool> decode_pool_;
     // [C] E: emote 播放器（资源）+ 层 id；读档须 clear
     std::map<std::string, EmoteLayerState> emote_layers_;
+    bool emote_external_pose_ = false;
     // [C] E: 诊断计数
     size_t emote_layer_events_ = 0;
     // [C] E: 语音 id 发生器（单调；读档不恢复）
@@ -447,7 +453,7 @@ struct GameRuntime::RuntimeState {
     /// parks (FPM title interactions queue tags while parked). A queued wait
     /// replaces wait_; a
     /// queued jump/call/return moves the interpreter position and clears wait_.
-    void drain_parked_queue();
+    void drain_parked_queue(bool immediate_only = false);
     /// Pointer chain: hit test -> hover set diff ->
     /// click/drag/push dispatch. Returns which dispatches claimed the
     /// left-down edge (for the `clicked` formula).

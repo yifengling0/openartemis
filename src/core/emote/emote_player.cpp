@@ -36,7 +36,6 @@ EmotePlayer::EmotePlayer() {
     if (const char* fps = std::getenv("OA_EMOTE_FPS")) {
         const int v = std::atoi(fps);
         if (v >= 2 && v <= 60) {
-            kFps = v;
             pose_fps_ = v;
             render_interval_ms_ = uint64_t(1000 / (v < 8 ? v : 8));
         }
@@ -52,6 +51,61 @@ EmotePlayer::EmotePlayer() {
 }
 
 EmotePlayer::~EmotePlayer() = default;
+
+double EmotePlayer::ScalarTween::value() const {
+    const double u = duration > 0 ? std::clamp(elapsed / duration, 0.0, 1.0) : 1.0;
+    // The target framework uses easing=0. Keep linear interpolation for other
+    // values until their native curve is verified; report that approximation.
+    return from + (to - from) * u;
+}
+
+bool EmotePlayer::ScalarTween::advance(double frames) {
+    elapsed = std::min(duration, elapsed + frames);
+    return elapsed >= duration;
+}
+
+void EmotePlayer::finish_variable_tweens() {
+    for (const auto& [name, tween] : variable_tweens_) explicit_[name] = tween.to;
+    variable_tweens_.clear();
+}
+
+double EmotePlayer::blink_interval(const EyeControl& c) {
+    blink_random_ = blink_random_ * 1664525u + 1013904223u;
+    const double lo = std::max(0.0, c.blinkIntervalMin);
+    const double hi = std::max(lo, c.blinkIntervalMax);
+    return std::max(1.0, lo + (hi - lo) * (double(blink_random_) / 4294967296.0));
+}
+
+void EmotePlayer::advance_eyes(double frames) {
+    eyes_.resize(file_.eyeControls.size());
+    for (size_t i = 0; i < eyes_.size(); ++i) {
+        auto& eye = eyes_[i];
+        const auto& c = file_.eyeControls[i];
+        if (!std::isfinite(c.blinkFrameCount) || c.blinkFrameCount <= 0 ||
+            !std::isfinite(c.blinkIntervalMin) || !std::isfinite(c.blinkIntervalMax)) continue;
+        if (!eye.initialized) {
+            eye.wait = blink_interval(c);
+            eye.initialized = true;
+        }
+        double remaining = frames;
+        while (remaining > 0) {
+            if (eye.phase < 0) {
+                const double step = std::min(remaining, eye.wait);
+                eye.wait -= step;
+                remaining -= step;
+                if (eye.wait <= 0) eye.phase = 0;
+            } else {
+                const double step = std::min(remaining, c.blinkFrameCount - eye.phase);
+                eye.phase += step;
+                remaining -= step;
+                if (eye.phase >= c.blinkFrameCount) {
+                    eye.phase = -1;
+                    eye.wait = blink_interval(c);
+                }
+            }
+        }
+    }
+}
 
 bool EmotePlayer::load(const uint8_t* data, size_t size, int canvasW, int canvasH,
                        std::string* err) {
@@ -92,6 +146,15 @@ bool EmotePlayer::load(const std::vector<uint8_t>& data, int canvasW, int canvas
 void EmotePlayer::init_defaults() {
     defaults_.clear();
     explicit_.clear();
+    variable_tweens_.clear();
+    diff_.clear();
+    fg_list_.clear();
+    idle_list_.clear();
+    eyes_.clear();
+    rendered_vars_.clear();
+    rgba_.clear();
+    last_advance_ms_ = last_render_ms_ = 0;
+    blink_random_ ^= uint32_t(file_.uid());
     for (const auto& name : file_.variableNames) defaults_[name] = 0.0;
     // collect every motion parameter id too (timeline tracks may write them)
     for (const auto& m : file_.motions)
@@ -314,22 +377,54 @@ double EmotePlayer::start_phase(const EmoteTimeline* tl) const {
 // (the reference's engine-level currStartTick resets every parallel track's
 // phase and is deliberately not copied).
 void EmotePlayer::step_slots(double frames) {
+    if (!std::isfinite(frames) || frames <= 0) return;
+    for (auto it = variable_tweens_.begin(); it != variable_tweens_.end();) {
+        const bool done = it->second.advance(frames);
+        explicit_[it->first] = it->second.value();
+        if (done) it = variable_tweens_.erase(it);
+        else ++it;
+    }
     auto step_one = [&](Slot& slot) {
         if (!slot.active) return false;
         const EmoteTimeline* tl = find_timeline(slot.label);
         if (!tl) return false;
+        if (slot.fading) {
+            const bool done = slot.fade.advance(frames);
+            slot.weight = slot.fade.value();
+            slot.fading = !done;
+            if (done && slot.stopWhenFaded) return false;
+        }
         slot.t += frames;
         settle_slot(slot, tl);
         return slot.active;
     };
-    step_one(idle_);
+    for (auto it = idle_list_.begin(); it != idle_list_.end();) {
+        if (step_one(*it)) ++it;
+        else it = idle_list_.erase(it);
+    }
     for (auto it = fg_list_.begin(); it != fg_list_.end();) {
         if (step_one(*it)) ++it;
-        else it = fg_list_.erase(it);
+        else {
+            if (it->stopWhenFaded && it->weight <= 0) {
+                // Apply the zero-weight endpoint before removing this writer.
+                // Otherwise the persistent domain retains the previous tick's
+                // partially faded sample indefinitely.
+                if (const auto* tl = find_timeline(it->label)) {
+                    for (const auto& track : tl->variables) {
+                        if (!track_label_writable(track.label)) continue;
+                        const auto v = it->fadeBase.find(track.label);
+                        base_[track.label] = v == it->fadeBase.end() ? 0 : v->second;
+                    }
+                }
+            }
+            it = fg_list_.erase(it);
+        }
     }
+    advance_eyes(frames);
 }
 
 void EmotePlayer::progress(double frames) {
+    if (!std::isfinite(frames)) return;
     // game-driven clock — the E-mote SDK Progress() contract.
     // The host Lua framework computes the elapsed 60-fps frame count from
     // its own clock and calls em:progress(fr) every vsync (甜蜜女友3
@@ -383,24 +478,45 @@ void EmotePlayer::compose() {
             if (!track_label_writable(track.label)) continue;
             double v = 0;
             if (!track_value(track, slot.t, &v)) continue;
-            base_[track.label] = v; // absolute write into the persistent domain
+            // A fading absolute writer blends from a stable domain snapshot;
+            // repeated compose() calls must not integrate the weight again.
+            if (slot.weight < 1) {
+                const auto it = slot.fadeBase.find(track.label);
+                const double from = it == slot.fadeBase.end() ? 0 : it->second;
+                v = from + (v - from) * slot.weight;
+            }
+            base_[track.label] = v;
             total[track.label] = v;
         }
     }
-    if (idle_.active) {
-        const EmoteTimeline* tl = find_timeline(idle_.label);
+    for (const Slot& idle : idle_list_) {
+        if (!idle.active) continue;
+        const EmoteTimeline* tl = find_timeline(idle.label);
         if (tl) {
             for (const auto& track : tl->variables) {
                 if (!track_label_writable(track.label)) continue;
                 double v = 0;
-                if (!track_value(track, idle_.t, &v)) continue;
-                total[track.label] += v; // delta layer; never folded into base_
+                if (!track_value(track, idle.t, &v)) continue;
+                total[track.label] += v * idle.weight;
             }
         }
     }
     for (const auto& [k, v] : explicit_) {
         total[k] = v;
         base_[k] = v;
+    }
+    // Eye controllers are a pose overlay, never a persistent-domain write.
+    // Explicit eye commands and non-neutral expressions keep ownership.
+    for (size_t i = 0; i < eyes_.size() && i < file_.eyeControls.size(); ++i) {
+        const auto& c = file_.eyeControls[i];
+        const auto& eye = eyes_[i];
+        if (eye.phase < 0 || c.blinkFrameCount <= 0 || explicit_.count(c.label)) continue;
+        const auto it = total.find(c.label);
+        if (it == total.end() || std::fabs(it->second - c.beginFrame) > 1e-6) continue;
+        const double u = std::clamp(eye.phase / c.blinkFrameCount, 0.0, 1.0);
+        // Reference eye controller: 40% close, 20% fully closed, 40% open.
+        const double amount = u < 0.4 ? u / 0.4 : u <= 0.6 ? 1.0 : (1.0 - u) / 0.4;
+        it->second += (c.endFrame - c.beginFrame) * amount;
     }
     for (const auto& sel : file_.selectors) {
         if (sel.options.empty()) continue;
@@ -461,6 +577,10 @@ void EmotePlayer::render_now() {
     compose();
     dirty_ = true;
     render();
+}
+
+bool EmotePlayer::rasterize_current_pose(std::string* err) {
+    return render_static_frame(file_, vars_, width_, height_, view_options(), &rgba_, err);
 }
 
 oa::emote::StaticRenderOptions EmotePlayer::view_options() const {
@@ -532,23 +652,54 @@ void EmotePlayer::play_timeline(const std::string& label, int flags) {
     slot.t = start_phase(tl);
     slot.active = true;
     slot.flags = flags;
+    slot.fadeBase = base_;
     fg_list_.push_back(std::move(slot));
     compose();
     render_now();
 }
 
-void EmotePlayer::fade_in_timeline(const std::string& label) {
-    if (!find_timeline(label)) {
+void EmotePlayer::fade_in_timeline(const std::string& label, double frames, double easing) {
+    const auto* tl = find_timeline(label);
+    if (!tl) {
         if (std::getenv("OA_EMOTE_DEBUG"))
             std::fprintf(stderr, "[emote] fadeInTimeline: unknown timeline '%s'\n",
                          label.c_str());
         return;
     }
-    if (idle_.label != label) idle_.t = 0;
-    idle_.label = label;
-    idle_.active = true;
+    auto it = std::find_if(idle_list_.begin(), idle_list_.end(), [&](const Slot& s) {
+        return s.label == label;
+    });
+    if (it == idle_list_.end()) {
+        if (idle_list_.size() >= kMaxForegroundSlots) idle_list_.erase(idle_list_.begin());
+        Slot s;
+        s.label = label;
+        s.t = start_phase(tl);
+        s.active = true;
+        s.weight = frames > 0 ? 0 : 1;
+        idle_list_.push_back(std::move(s));
+        it = idle_list_.end() - 1;
+    }
+    it->stopWhenFaded = false;
+    it->fading = std::isfinite(frames) && frames > 0;
+    it->fade = {it->weight, 1, 0, frames, easing};
+    if (!it->fading) it->weight = 1;
     compose();
     render_now();
+}
+
+void EmotePlayer::fade_out_timeline(const std::string& label, double frames, double easing) {
+    if (!std::isfinite(frames) || frames <= 0) {
+        stop_timeline(label);
+        return;
+    }
+    auto fade = [&](Slot& s) {
+        if (!label.empty() && s.label != label) return;
+        s.fade = {s.weight, 0, 0, frames, easing};
+        s.fading = true;
+        s.stopWhenFaded = true;
+    };
+    for (auto& s : idle_list_) fade(s);
+    for (auto& s : fg_list_) fade(s);
 }
 
 void EmotePlayer::pass() {
@@ -605,7 +756,8 @@ void EmotePlayer::step() {
     // one-shot has lastTime = -1: a stepped expression reverted to its START
     // pose — arm_type snapped back to the t0 arm group A — instead of the
     // authored tail pose a natural end leaves in the domain.)
-    if (fg_list_.empty()) return;
+    if (fg_list_.empty() && variable_tweens_.empty()) return;
+    finish_variable_tweens();
     fold_foreground_end();
     fg_list_.clear();
     compose();
@@ -619,15 +771,12 @@ void EmotePlayer::skip() {
     // (fold_foreground_end — same natural-end pose as step()),
     // then the list ends; the idle loop is a delta layer and simply stops
     // (variables keep their domain values).
+    finish_variable_tweens();
     if (!fg_list_.empty()) {
         fold_foreground_end();
         fg_list_.clear();
     }
-    if (idle_.active) {
-        idle_.t = 0;
-        idle_.active = false;
-        idle_.label.clear();
-    }
+    idle_list_.clear();
     compose();
     render_now();
 }
@@ -635,10 +784,9 @@ void EmotePlayer::skip() {
 void EmotePlayer::stop() {
     // both slots end internally; the persistent domain keeps the current
     // pose (header contract: "both slots off at the current pose")
-    idle_.active = false;
-    idle_.label.clear();
-    idle_.t = 0;
+    idle_list_.clear();
     fg_list_.clear();
+    variable_tweens_.clear();
     compose();
     render_now();
 }
@@ -648,10 +796,8 @@ void EmotePlayer::stop_idle_timeline() {
     // / fadeOutTimeline on an idle match. The delta layer stops applying;
     // the persistent domain keeps its pose and the foreground slot keeps
     // playing (a still-running expression/voice timeline is unaffected).
-    if (!idle_.active) return;
-    idle_.active = false;
-    idle_.label.clear();
-    idle_.t = 0;
+    if (idle_list_.empty()) return;
+    idle_list_.clear();
     compose();
     render_now();
 }
@@ -669,9 +815,20 @@ void EmotePlayer::set_coord(double x, double y) {
     render_now();
 }
 
-void EmotePlayer::set_variable(const std::string& name, double value) {
-    if (name.empty()) return;
-    explicit_[name] = value;
+void EmotePlayer::set_variable(const std::string& name, double value,
+                                double frames, double easing) {
+    if (name.empty() || !std::isfinite(value)) return;
+    if (std::isfinite(frames) && frames > 0) {
+        const double from = get_variable(name);
+        explicit_[name] = from;
+        variable_tweens_[name] = {from, value, 0, frames, easing};
+        if (easing != 0 && std::getenv("OA_EMOTE_DEBUG"))
+            std::fprintf(stderr, "[emote] setVariable '%s': easing %.3f approximated linearly\n",
+                         name.c_str(), easing);
+    } else {
+        variable_tweens_.erase(name);
+        explicit_[name] = value;
+    }
     compose();
     schedule_render(false);
 }
@@ -720,18 +877,18 @@ bool EmotePlayer::stop_timeline(const std::string& label) {
     // keeps the pose (persistent-variable model).
     bool found = false;
     for (auto it = fg_list_.begin(); it != fg_list_.end();) {
-        if (it->label == label) {
+        if (label.empty() || it->label == label) {
             it = fg_list_.erase(it);
             found = true;
         } else {
             ++it;
         }
     }
-    if (idle_.active && idle_.label == label) {
-        idle_.active = false;
-        idle_.label.clear();
-        idle_.t = 0;
-        found = true;
+    for (auto it = idle_list_.begin(); it != idle_list_.end();) {
+        if (label.empty() || it->label == label) {
+            it = idle_list_.erase(it);
+            found = true;
+        } else ++it;
     }
     if (found) {
         compose();
@@ -741,14 +898,17 @@ bool EmotePlayer::stop_timeline(const std::string& label) {
 }
 
 bool EmotePlayer::is_timeline_playing(const std::string& label) const {
-    if (label.empty()) return false;
-    if (idle_.active && idle_.label == label) return true;
+    if (label.empty()) return !idle_list_.empty() || !fg_list_.empty();
+    for (const Slot& slot : idle_list_)
+        if (slot.active && slot.label == label) return true;
     for (const Slot& slot : fg_list_)
         if (slot.active && slot.label == label) return true;
     return false;
 }
 
-double EmotePlayer::idle_time() const { return idle_.active ? idle_.t : -1.0; }
+double EmotePlayer::idle_time() const {
+    return idle_list_.empty() ? -1.0 : idle_list_.back().t;
+}
 
 std::vector<EmotePlayer::ForegroundSlot> EmotePlayer::foreground_slots() const {
     std::vector<ForegroundSlot> out;
@@ -769,7 +929,7 @@ std::string EmotePlayer::foreground_timeline() const {
 }
 
 std::string EmotePlayer::idle_timeline() const {
-    return idle_.active ? idle_.label : "";
+    return idle_list_.empty() ? "" : idle_list_.back().label;
 }
 
 std::map<std::string, double> EmotePlayer::variables() const { return vars_; }

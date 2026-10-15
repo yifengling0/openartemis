@@ -156,6 +156,7 @@ public:
     };
     bool async_decode_enabled() const { return async_decode_; }
     bool consume_async_completion() {
+        drain_async_decodes(); // host calls this before deciding to skip a static frame
         const bool had = async_completion_;
         async_completion_ = false;
         return had;
@@ -510,18 +511,13 @@ private:
     // file's part positions (research/132). Stale textures of a layer are
     // destroyed on its next draw. OA_EMOTE_ATLAS_KEY=legacy restores the
     // layer-only key (A/B arm for the pre-fix behaviour).
-    struct EmoteAtlasKey {
-        oa::render::TextureKey layer;
-        int source = 0;
-        uint64_t file = 0; // EmoteFile::uid()
-        bool operator<(const EmoteAtlasKey& o) const {
-            if (layer < o.layer) return true;
-            if (o.layer < layer) return false;
-            if (source != o.source) return source < o.source;
-            return file < o.file;
-        }
+    struct EmoteAtlasCache {
+        uint64_t file = 0;
+        std::vector<TextureRef> sources;
     };
-    std::map<EmoteAtlasKey, TextureRef> emote_atlases_;
+    std::map<oa::render::TextureKey, EmoteAtlasCache> emote_atlases_;
+    std::vector<Vertex> emote_vertices_;
+    void prune_emote_textures(const oa::render::Compositor& scene);
     // Transitions: capture texture for the overlay — type-1 crossfade
     // draws it on top of the new scene at opacity 1-progress; type-2 rule
     // dissolve (GLES line) re-uses it as the dissolve source (per-pixel

@@ -965,18 +965,17 @@ void AudioSink::note_device_pull(const SDL_AudioSpec* spec, int buflen) {
     if (!spec || buflen <= 0) return;
     if (spec->freq != 44100 || spec->channels != 2) return;
     ++device_callbacks_;
-    // "Ran dry": SDL removed everything this stream had for this callback, so
-    // the shortfall was padded with silence. That hole in the middle of a
-    // continuous source (BGM) is the click/dropout this revision is about —
-    // counted here on the DEVICE side (the only place it is observable) and
-    // only while the stream is live (an idle stream is empty by definition).
+#ifndef OA_USE_SDL2
+    // SDL3's post-mix hook exposes the remaining queue, not the read length.
+    // Keep its empty-queue estimate; SDL2 counts actual short reads below.
+    // Only inspect recently active streams (idle streams are always empty).
     const uint64_t now = SDL_GetTicks();
     for (int i = 0; i < kStreamCount; ++i) {
-        if (last_push_ms_[i] == 0 || now - last_push_ms_[i] > 250) continue;
-        // SDL2: audio_callback already holds mutex_; queued_frames() would
-        // deadlock the device thread (non-recursive mutex) and freeze tick().
+        const uint64_t last = last_push_ms_[i].load(std::memory_order_relaxed);
+        if (last == 0 || now - last > 250) continue;
         if (queued_frames_locked(i) == 0) ++underruns_[i];
     }
+#endif
 }
 
 void SDLCALL sink_postmix_cb(void* ud, const SDL_AudioSpec* spec, float* buffer,
@@ -1002,6 +1001,11 @@ void SDLCALL AudioSink::audio_callback(void* userdata, Uint8* stream, int len) {
     for (int i = 0; i < kStreamCount; ++i) {
         if (!sink->stream_[i]) continue;
         const int got = SDL_AudioStreamGet(sink->stream_[i], sink->mix_scratch_.data(), len);
+        const uint64_t last = sink->last_push_ms_[i].load(std::memory_order_relaxed);
+        // An exactly full read may leave an empty queue without any silence.
+        // Count the actual short read, not the queue's level after the pull.
+        if (got < len && last != 0 && SDL_GetTicks() - last <= 250)
+            ++sink->underruns_[i];
         if (got <= 0) continue;
         if (f32) {
             auto* dst = reinterpret_cast<float*>(stream);
@@ -1206,73 +1210,70 @@ bool pull_frame(MediaPlayers::Player& p,
     }
 }
 
-/// Pull frames up to logical index idx (so both idx and idx+1 exist), then
-/// trim every frame below idx. Queries arrive in non-decreasing idx order.
-///
-/// With a decode-pool prefetch attached, the frames up to the worker's
-/// produced watermark are copied out of the ring first (same deterministic
-/// stream, byte-identical to synchronous decoding); anything beyond the
-/// watermark falls through to the synchronous decoder, which realigns by
-/// decoding-and-discarding up to the logical tail before appending.
-void prepare_upto(MediaPlayers::Player& p,
-                  const std::function<std::optional<std::vector<uint8_t>>(const std::string&)>&
-                      loader,
-                  size_t idx) {
-    const size_t stride = size_t(p.avail_ch);
-
-    // Pool prefetch fast path.
-    if (p.prefetch) {
-        auto pf = p.prefetch;
-        std::unique_lock<std::mutex> lk(pf->mu);
-        const size_t tail = p.dq_start + p.dq.size() / stride;
-        if (!pf->cancel && pf->produced > tail) {
-            // The worker is normally far ahead; wait only a hairline when it
-            // is mid-chunk, then fall back synchronously if still behind.
-            pf->cv.wait_for(lk, std::chrono::milliseconds(1), [&] {
-                return pf->cancel || pf->eof || pf->produced >= idx + 2;
-            });
-            const size_t to = std::min(idx + 1, pf->produced);
-            for (size_t i = tail; i < to; ++i) {
-                for (size_t c = 0; c < stride; ++c) {
-                    p.dq.push_back(pf->ring[(i % pf->cap) * stride + c]);
-                }
-            }
-            if (to > pf->consumed) {
-                pf->consumed = to;
-                pf->cv.notify_all(); // worker may be blocked on the ring cap
-            }
-        }
-    }
-
-    while (p.zero_from == kNoFrame &&
-           p.dq_start + p.dq.size() / stride <= idx + 1) {
-        // Synchronous fallback. The sync decoder restarts at stream zero
-        // whenever it runs, so frames already supplied by the prefetch
-        // worker must be decoded-and-discarded to reach the logical tail.
-        const size_t tail = p.dq_start + p.dq.size() / stride;
-        while (p.pull_seq < tail) {
-            float tmp[8];
-            if (!pull_frame(p, loader, tmp)) {
-                p.zero_from = size_t(p.pull_seq);
-                break;
-            }
-            ++p.pull_seq;
-        }
-        if (p.zero_from != kNoFrame) break;
-        if (p.pull_seq != tail) continue; // keep aligning
-
-        std::vector<float> frame(stride, 0.0f);
-        if (!pull_frame(p, loader, frame.data())) {
-            // Non-loop EOF or a given-up loop: silence from here on.
-            p.zero_from = size_t(p.pull_seq);
+// Called with pf.mu held. Both the worker and a late mixer advance this
+// single decoder, so a fallback never re-decodes the channel's history.
+void fill_prefetch(MediaPlayers::Player::Prefetch& pf,
+                   const std::function<std::optional<std::vector<uint8_t>>(const std::string&)>& loader) {
+    auto& decoder = *pf.decoder;
+    const size_t stride = size_t(decoder.avail_ch);
+    const size_t count = std::min(size_t(kChunkFrames), pf.cap - (pf.produced - pf.consumed));
+    float frame[2] = {};
+    for (size_t i = 0; i < count && !pf.eof; ++i) {
+        if (!pull_frame(decoder, loader, frame)) {
+            pf.eof = true;
             break;
         }
-        ++p.pull_seq;
-        p.dq.insert(p.dq.end(), frame.begin(), frame.end());
+        const size_t slot = (pf.produced % pf.cap) * stride;
+        for (size_t c = 0; c < stride; ++c) pf.ring[slot + c] = frame[c];
+        ++pf.produced;
     }
-    while (p.dq_start < idx && p.dq.size() >= stride) {
-        p.dq.erase(p.dq.begin(), p.dq.begin() + stride);
-        ++p.dq_start;
+}
+
+// Prepare the entire resampling window once per channel/block. In particular
+// the final interpolation needs last+1, even when its fractional weight is 0.
+// The old per-sample path copied only through idx, then synchronously decoded
+// idx+1, defeating prefetch on every sample and repeatedly locking/allocating.
+void prepare_window(MediaPlayers::Player& p,
+                    const std::function<std::optional<std::vector<uint8_t>>(const std::string&)>& loader,
+                    size_t first, size_t last) {
+    const size_t stride = size_t(p.avail_ch);
+    const size_t drop = std::min(first - p.dq_start, p.dq.size() / stride);
+    p.dq.erase(p.dq.begin(), p.dq.begin() + drop * stride);
+    p.dq_start += drop;
+    if (p.zero_from != kNoFrame) return;
+    const size_t end = last + 2;
+    p.dq.reserve((end - p.dq_start) * stride);
+    size_t tail = p.dq_start + p.dq.size() / stride;
+    while (p.zero_from == kNoFrame && tail < end) {
+        if (p.prefetch) {
+            auto& pf = *p.prefetch;
+            std::unique_lock<std::mutex> lk(pf.mu);
+            if (pf.cancel) break;
+            if (pf.produced == pf.consumed && !pf.eof)
+                fill_prefetch(pf, loader);
+            const size_t count = std::min(end - tail, pf.produced - pf.consumed);
+            const size_t begin = pf.consumed % pf.cap;
+            const size_t contiguous = std::min(count, pf.cap - begin);
+            p.dq.insert(p.dq.end(), pf.ring.data() + begin * stride,
+                        pf.ring.data() + (begin + contiguous) * stride);
+            p.dq.insert(p.dq.end(), pf.ring.data(),
+                        pf.ring.data() + (count - contiguous) * stride);
+            pf.consumed += count;
+            tail += count;
+            p.in_b_segment = pf.decoder->in_b_segment;
+            if (pf.eof && pf.consumed == pf.produced) p.zero_from = pf.produced;
+            lk.unlock();
+            pf.cv.notify_all();
+        } else {
+            float frame[2] = {};
+            if (!pull_frame(p, loader, frame)) {
+                p.zero_from = tail;
+                break;
+            }
+            p.dq.insert(p.dq.end(), frame, frame + stride);
+            ++p.pull_seq;
+            ++tail;
+        }
     }
 }
 
@@ -1285,17 +1286,8 @@ float frame_sample(MediaPlayers::Player& p, size_t idx, long c) {
 }
 
 // ---------------------------------------------------------------------------
-// Decode-pool prefetch workers: each active channel decodes the SAME
-// deterministic source-frame stream ahead of the mixer (loops included: the
-// worker mirrors pull_frame's A-B switch / seek-zero restart rules, so it
-// keeps producing across file boundaries and only exits at cancel or at a
-// real give-up). The main-thread synchronous path stays authoritative;
-// workers only make frames available earlier (output bytes are identical).
-//
-// Hosting model: wasm shares one DecodePool worker per slot (threads are
-// precious there); native builds give every audio channel its OWN dedicated
-// thread (low latency: a channel never queues behind another one's decode),
-// which is destroyed when the channel ends (cancel/eof -> worker returns).
+// Decode-pool prefetch workers share a decoder with their mixer. Native
+// channels have a dedicated worker; wasm uses an available pool slot.
 // ---------------------------------------------------------------------------
 
 void cancel_prefetch(MediaPlayers::Player& p) {
@@ -1305,104 +1297,25 @@ void cancel_prefetch(MediaPlayers::Player& p) {
         p.prefetch->cancel = true;
     }
     p.prefetch->cv.notify_all();
+#if !defined(__EMSCRIPTEN__)
+    if (p.prefetch->worker.joinable()) p.prefetch->worker.join();
+#endif
 }
 
 using LoaderFn =
     std::function<std::optional<std::vector<uint8_t>>(const std::string&)>;
 
-/// The audio prefetch worker body (runs on a dedicated native thread or on
-/// a DecodePool worker under wasm). Produces source frames into the ring
-/// with pull_frame-equivalent loop semantics; exits only at cancel/eof.
 void run_audio_worker(const std::shared_ptr<MediaPlayers::Player::Prefetch>& pf,
-                      LoaderFn loader, std::string file, bool loop_play,
-                      std::optional<std::string> loop_file, long src_ch,
-                      long avail_ch) {
-    auto open_file = [&](const std::string& f) -> std::unique_ptr<VorbisSource> {
-        auto bytes = loader(f);
-        return bytes ? VorbisSource::open(std::move(*bytes)) : nullptr;
-    };
-    auto give_up = [&] {
-        std::lock_guard<std::mutex> lk(pf->mu);
-        pf->eof = true;
-        pf->cv.notify_all();
-    };
-    std::unique_ptr<VorbisSource> src = open_file(file);
-    if (!src) {
-        give_up();
-        return;
-    }
-    const long s_ch = long(src->channels());
-    if (s_ch < 1 || s_ch != src_ch) { // identical file => identical layout
-        give_up();
-        return;
-    }
-    const double rate = double(src->rate());
-    bool in_b = false; // A-B loop currently in the loop segment (foo_b)
-    std::vector<float> planar(size_t(src_ch) * kChunkFrames);
-    std::vector<float> frame_buf(size_t(avail_ch) * kChunkFrames);
+                      const LoaderFn& loader) {
     for (;;) {
-        // Backpressure: reserve room for the next chunk before decoding.
-        {
-            std::unique_lock<std::mutex> lk(pf->mu);
-            pf->cv.wait(lk, [&] {
-                return pf->cancel ||
-                       pf->produced + kChunkFrames - pf->consumed <= pf->cap;
-            });
-            if (pf->cancel) return;
-        }
-        const long got = src->read(planar.data(), kChunkFrames);
-        if (got <= 0) {
-            // End of the current source: mirror pull_frame's loop rules.
-            bool restart = false;
-            if (loop_play && !in_b && loop_file) {
-                // A-B loop: the intro (foo_a) ended; switch to the loop
-                // segment (foo_b) once, then loop it forever.
-                auto b = open_file(*loop_file);
-                if (b && long(b->channels()) == src_ch && b->rate() == rate) {
-                    src = std::move(b);
-                    in_b = true;
-                    restart = true;
-                }
-            } else if (loop_play) {
-                restart = src->seek_zero();
-            }
-            if (!restart) {
-                // Non-loop EOF or a loop that gave up (missing/incompatible
-                // B segment, seek failure): stop producing. The synchronous
-                // fallback re-runs the same rules on the main thread and
-                // owns the silent_forever / finish semantics.
-                give_up();
-                return;
-            }
-            continue; // no frame produced: the next element comes from the
-                      // restarted/segmented source
-        }
-        // Same mapping as pull_frame (planar is channel-major; >2-channel
-        // sources average down to mono).
-        for (long f = 0; f < got; ++f) {
-            if (src_ch == avail_ch) {
-                for (long c = 0; c < avail_ch; ++c) {
-                    frame_buf[size_t(f) * size_t(avail_ch) + size_t(c)] =
-                        planar[size_t(c) * kChunkFrames + size_t(f)];
-                }
-            } else {
-                float sum = 0.0f;
-                for (long c = 0; c < src_ch; ++c) {
-                    sum += planar[size_t(c) * kChunkFrames + size_t(f)];
-                }
-                frame_buf[size_t(f)] = sum / float(src_ch);
-            }
-        }
         std::unique_lock<std::mutex> lk(pf->mu);
-        for (long f = 0; f < got; ++f) {
-            const size_t slot =
-                ((pf->produced + size_t(f)) % pf->cap) * size_t(avail_ch);
-            for (long c = 0; c < avail_ch; ++c) {
-                pf->ring[slot + size_t(c)] =
-                    frame_buf[size_t(f) * size_t(avail_ch) + size_t(c)];
-            }
-        }
-        pf->produced += size_t(got);
+        pf->cv.wait(lk, [&] {
+            return pf->cancel || pf->eof ||
+                   pf->produced - pf->consumed + kChunkFrames <= pf->cap;
+        });
+        if (pf->cancel || pf->eof) return;
+        fill_prefetch(*pf, loader);
+        lk.unlock();
         pf->cv.notify_all();
     }
 }
@@ -1418,36 +1331,27 @@ std::shared_ptr<MediaPlayers::Player::Prefetch> start_prefetch(
         // stays flat).
         pf->ring.assign(pf->cap * size_t(p.avail_ch), 0.0f);
     }
-    const std::string file = p.file;
+    pf->decoder = std::make_unique<MediaPlayers::Player>();
+    auto& decoder = *pf->decoder;
+    decoder.src = std::move(p.src);
+    decoder.src_ch = p.src_ch;
+    decoder.avail_ch = p.avail_ch;
+    decoder.rate = p.rate;
+    decoder.loop_play = p.loop_play;
+    decoder.loop_file = p.loop_file;
     const LoaderFn loader_copy = loader;
-    const long src_ch = p.src_ch;
-    const long avail_ch = p.avail_ch;
-    const bool loop_play = p.loop_play;
-    const std::optional<std::string> loop_file = p.loop_file;
 
 #if defined(__EMSCRIPTEN__)
-    // wasm: share the (configurable) DecodePool; one slot per channel.
-    const bool ok = pool->submit_long([pf, loader_copy, file, loop_play, loop_file,
-                                       src_ch, avail_ch] {
-        run_audio_worker(pf, loader_copy, file, loop_play, loop_file, src_ch,
-                         avail_ch);
-    });
-    if (!ok) return nullptr;
+    if (!pool->submit_long([pf, loader_copy] { run_audio_worker(pf, loader_copy); })) {
+        p.src = std::move(decoder.src);
+        return nullptr;
+    }
 #else
-    // Native: one DEDICATED thread per audio channel (low latency: a
-    // channel never waits behind another channel's decode). The thread is
-    // detached; it returns — and is destroyed — when the channel ends
-    // (cancel) or the stream gives up (eof). It only touches its captured
-    // copies (loader + prefetch state), never the players.
     try {
-        std::thread worker([pf, loader_copy, file, loop_play, loop_file, src_ch,
-                            avail_ch] {
-            run_audio_worker(pf, loader_copy, file, loop_play, loop_file, src_ch,
-                             avail_ch);
-        });
-        worker.detach();
+        pf->worker = std::thread([pf, loader_copy] { run_audio_worker(pf, loader_copy); });
     } catch (const std::exception&) {
-        return nullptr; // thread creation failed: plain synchronous decode
+        p.src = std::move(decoder.src);
+        return nullptr;
     }
 #endif
     return pf;
@@ -1767,7 +1671,8 @@ void MediaPlayers::update(uint64_t delta_ms, AudioEngine& engine, const FinishFn
     }
 
     // Mix.
-    std::vector<float> mix(2 * n, 0.0f);
+    mix_.assign(2 * n, 0.0f);
+    auto& mix = mix_;
     const float master = engine.state().master_volume;
     MixDiag& md = g_mix_diag();
     if (!md.enabled && std::getenv("OA_AUDIO_MIXDIAG") != nullptr) {
@@ -1842,11 +1747,12 @@ void MediaPlayers::update(uint64_t delta_ms, AudioEngine& engine, const FinishFn
         const double ratio = p.rate / double(kOutputRate);
         // The stream ends mid-block when the last real frame falls inside it.
         const double block_end = p.p + double(n) * ratio;
+        prepare_window(p, loader_, size_t(std::floor(p.p)),
+                       size_t(std::floor(p.p + double(n - 1) * ratio)));
         for (size_t i = 0; i < n; ++i) {
             const double pos = p.p + double(i) * ratio;
             const long k = long(std::floor(pos));
             const float f = float(pos - double(k));
-            prepare_upto(p, loader_, size_t(k));
             if (p.avail_ch == 1) {
                 const float v0 = frame_sample(p, size_t(k), 0);
                 const float v1 = frame_sample(p, size_t(k + 1), 0);

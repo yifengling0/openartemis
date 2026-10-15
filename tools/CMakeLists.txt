@@ -22,7 +22,7 @@ add_executable(fontedge fontedge.cpp)
 
 # fontedge 直接调 FreeType（描边/栅格化在 libopenartemis 内，但该静态库不
 # 传递链接 Freetype —— 与 src/app 同样显式链）。
-find_package(Freetype CONFIG REQUIRED)
+find_package(Freetype REQUIRED)
 target_link_libraries(fontedge PRIVATE libopenartemis Freetype::Freetype)
 
 foreach(oa_tool opfs psb asb oasave)

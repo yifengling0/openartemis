@@ -1423,14 +1423,14 @@ void Interpreter::restore_completed_queued_barriers() {
     }
 }
 
-ExecutionResult Interpreter::run_queued() {
+ExecutionResult Interpreter::run_queued(bool immediate_only) {
     queued_saw_call_ = false;
     queued_saw_jump_ = false;
     // Only the queue drain (flush_tag_queue) — never inline script stepping.
     // Pauses are reported exactly like the run-entry drain, including the
     // last_wait_from_queue_ bookkeeping that makes next_line a no-op for
     // queue-sourced waits.
-    if (const auto wait_result = flush_tag_queue()) return *wait_result;
+    if (const auto wait_result = flush_tag_queue(immediate_only)) return *wait_result;
     return ExecutionResult::Completed;
 }
 
@@ -2904,8 +2904,8 @@ bool Interpreter::apply_var(const std::map<std::string, std::string>& params) {
 // Queued-tag drain (flushes the pending tag queue)
 // ---------------------------------------------------------------------------
 
-std::optional<ExecutionResult> Interpreter::flush_tag_queue() {
-    while (!tag_queue_.empty()) {
+std::optional<ExecutionResult> Interpreter::flush_tag_queue(bool immediate_only) {
+    while (!tag_queue_.empty() && (!immediate_only || immediate_tag_count_ > 0)) {
         Instruction ins = std::move(tag_queue_.front());
         tag_queue_.erase(tag_queue_.begin());
         if (immediate_tag_count_ > 0) --immediate_tag_count_;

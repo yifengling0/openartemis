@@ -58,16 +58,19 @@
 //    Env switches: OA_EMOTE_WRAP=diff restores the old diff-based wrap,
 //    OA_EMOTE_PARALLEL=0 restores single-slot replacement,
 //    OA_EMOTE_LEGACY_SLOTS=1 restores both (same-process REF/NEW A-B).
-//  * pose re-render is throttled (OA_EMOTE_FPS override, default ~4 fps)
-//    with immediate renders on play/setVariable/force changes; large
+//  * pose re-render is throttled (OA_EMOTE_FPS override; GPU default 30 fps,
+//    CPU default 8 fps). Pose cadence never changes the 60 fps authored clock.
+//    Play/force changes render immediately; variable writes follow pose cadence.
+//    Large
 //    canvases render at full resolution by default (the
 //    half-size canvas blurred the stretched figure); OA_EMOTE_HALFRES=1
 //    restores the half-size fallback for CPU-constrained hosts.
 //  * playTimeline(label, flags): start the foreground list — flags &
 //    TIMELINE_PLAY_PARALLEL (1) appends to the list, otherwise the list is
 //    cleared first (the reference startTimeline list, one entry per call);
-//    fadeInTimeline(label, fade, wait): (re)start the idle slot (fade ticks
-//    are accepted but no crossfade is applied; game calls use 0,0);
+//    fadeInTimeline(label, frames, easing): fade in a diff/idle track;
+//    fadeOutTimeline(label, frames, easing): keep the named track alive
+//    until its weight reaches zero. Multiple idle tracks crossfade together.
 //    pass(): every foreground entry ends internally (timeline no longer
 //    playing); the domain keeps the pose — the display does not jump
 //    (official SDK Pass semantics, api_skip.html);
@@ -81,8 +84,9 @@
 //    domain, idle delta layer dropped);
 //    stop(): both slots off; the domain keeps the current pose.
 //    stopTimeline(label): ends only the named entry (fg or idle).
-//  * setVariable(name, v): writes the domain and the composed frame (the
-//    value persists until a timeline/explicit writer changes it).
+//  * setVariable(name, v, frames, easing): interpolate from the current
+//    displayed value in authored frames; zero duration writes immediately.
+//    Easing=0 is linear; other easing values currently use linear approximation.
 // Pose-rotation axes (head_slant/body_slant — the only parameter axes whose
 // parameterized nodes carry angle keyframes in the real files) are ordinary
 // variables: the idle diff loop (通常待機) drives them per its authored
@@ -139,6 +143,8 @@ public:
     void progress(double frames);
     /// Force an immediate re-render (expression switch, explicit pose ops).
     void render_now();
+    /// Generate the current CPU pixels on demand after a GPU submission fails.
+    bool rasterize_current_pose(std::string* err = nullptr);
 
     // -- GPU compositing mode -----------------------------------------------
     /// When enabled the player stops rasterising: render() only snapshots
@@ -165,7 +171,10 @@ public:
     /// later entries overwrite earlier ones); without it the list is cleared
     /// first (the new timeline replaces every foreground entry).
     void play_timeline(const std::string& label, int flags = 0); // foreground list
-    void fade_in_timeline(const std::string& label);   // idle slot
+    void fade_in_timeline(const std::string& label, double frames = 0,
+                          double easing = 0);
+    void fade_out_timeline(const std::string& label, double frames = 0,
+                           double easing = 0);
     void pass();  // foreground list off
     void step();  // foreground evaluated at end, then off
     void skip();  // both slots at their end/rest pose
@@ -183,7 +192,8 @@ public:
     bool stop_timeline(const std::string& label);
     /// isTimelinePlaying(label): the named timeline plays in any slot.
     bool is_timeline_playing(const std::string& label) const;
-    void set_variable(const std::string& name, double value);
+    void set_variable(const std::string& name, double value, double frames = 0,
+                      double easing = 0);
     double get_variable(const std::string& name) const;
     /// SetVariableDiff(srcLabel, dstLabel, value) — the 差分 (difference) write
     /// the KukkoroDays framework uses to keep a script-driven face parameter
@@ -246,11 +256,20 @@ public:
     const std::vector<uint8_t>& rgba() const { return rgba_; }
 
 private:
+    struct ScalarTween {
+        double from = 0, to = 0, elapsed = 0, duration = 0, easing = 0;
+        double value() const;
+        bool advance(double frames);
+    };
     struct Slot {
         std::string label;
         double t = 0; // frames (60 fps units)
         bool active = false;
         int flags = 0; // playTimeline flags (PARALLEL bit)
+        double weight = 1;
+        ScalarTween fade;
+        bool fading = false, stopWhenFaded = false;
+        std::map<std::string, double> fadeBase;
     };
 
     const EmoteTimeline* find_timeline(const std::string& label) const;
@@ -270,6 +289,9 @@ private:
     /// Step the idle slot and every foreground entry by `frames` authored
     /// frames (shared by advance_ms/progress) and drop the entries that ended.
     void step_slots(double frames);
+    void finish_variable_tweens();
+    void advance_eyes(double frames);
+    double blink_interval(const EyeControl& control);
     /// Apply the shared slot end/wrap rules after a clock step: a timeline
     /// with an authored loopEnd>0 wraps in [loopBegin, loopEnd]; everything
     /// else deactivates at its authored end (see the
@@ -288,7 +310,7 @@ private:
     EmoteFile file_;
     int width_ = 0, height_ = 0;
     int req_width_ = 0, req_height_ = 0; // requested surface size at load
-    int kFps = 60;
+    static constexpr int kFps = 60; // authored clock, independent of pose cadence
     // pose cadence — krkr's runner evaluates and draws
     // the whole emote every display frame; our CPU raster forced a ~8 fps
     // throttle that aliased authored fast segments (expression entrance
@@ -323,7 +345,7 @@ private:
     std::set<std::string> selector_option_labels_;
     mutable S2Stats stats_; // track_label_writable is const (read path)
 
-    Slot idle_;
+    std::vector<Slot> idle_list_; // simultaneous diff loops during a crossfade
     // Ordered foreground play list (reference currTimeline): compose order =
     // list order, a later entry overwrites an earlier one for a shared
     // variable. Each entry keeps its own clock (the reference's shared
@@ -333,6 +355,13 @@ private:
     std::map<std::string, double> defaults_;
     // explicit setVariable writes (write the frame and the domain)
     std::map<std::string, double> explicit_;
+    std::map<std::string, ScalarTween> variable_tweens_;
+    struct EyeState {
+        double wait = 0, phase = -1;
+        bool initialized = false;
+    };
+    std::vector<EyeState> eyes_;
+    uint32_t blink_random_ = 0x9e3779b9;
     // SetVariableDiff offsets: a composer-side additive layer, never folded
     // into the domain and subtracted again by get_variable (see
     // set_variable_diff). Empty for every framework that never calls it.

@@ -903,17 +903,25 @@ static bool emote_pump_frames(AppState* state) {
     // raster (external-pose mode) so pose updates stay cheap.
     static const bool gpu = std::getenv("OA_EMOTE_GPU") == nullptr ||
                             std::getenv("OA_EMOTE_GPU")[0] != '0';
+    for (auto it = state->layer_emote_rev.begin(); it != state->layer_emote_rev.end();) {
+        if (rt->emote_layers().count(it->first)) { ++it; continue; }
+        state->layer_emote_parts.erase(it->first);
+        state->layer_emote_uid.erase(it->first);
+        it = state->layer_emote_rev.erase(it);
+    }
     bool any = false;
     for (const auto& [id, st] : rt->emote_layers()) {
         if (!st.player) continue;
         st.player->set_external_pose(gpu);
-        if (st.revision == 0 || state->layer_emote_rev[id] == st.revision) continue;
+        const uint64_t uid = st.player->file().uid();
+        if (st.revision == 0 || (state->layer_emote_rev[id] == st.revision &&
+                                 state->layer_emote_uid[id] == uid)) continue;
         // 读取域键 = 角色实例决定(emote 画布域,名 = 层 id;与场景侧
         // content_role_of(layer).texture_key 同源单点)。
         const oa::render::TextureKey tkey = oa::render::EmoteContent::canvas_key(id);
         bool presented = false;
         if (gpu && state->oaRender->renderer_ok()) {
-            std::vector<oa::emote::EmoteDrawPart> parts;
+            auto& parts = state->layer_emote_parts[id];
             std::string err;
             if (st.player->collect_pose_parts(&parts, &err) &&
                 state->oaRender->emote_render_parts(tkey, st.player->file(), parts,
@@ -926,6 +934,12 @@ static bool emote_pump_frames(AppState* state) {
             }
         }
         if (!presented) {
+            std::string err;
+            if (gpu && !st.player->rasterize_current_pose(&err)) {
+                if (std::getenv("OA_EMOTE_DEBUG"))
+                    std::fprintf(stderr, "[emote] CPU fallback failed: %s\n", err.c_str());
+                continue;
+            }
             const auto& rgba = st.player->rgba();
             if (state->oaRender->upload_host_frame(tkey, st.width, st.height,
                                                    rgba.data())) {
@@ -937,6 +951,7 @@ static bool emote_pump_frames(AppState* state) {
         }
         if (presented) {
             state->layer_emote_rev[id] = st.revision;
+            state->layer_emote_uid[id] = uid;
             // layer-model 簿记: 实际上传/GPU 合成 = HostFrame 内容写
             // （与 video 帧同款；redraw 门由调用方用返回的 any 消费）。
             state->rt->scene().mark_dirty(id, oa::render::DirtyAspect::HostFrame);
@@ -1747,6 +1762,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
                         state->opt.renderer.c_str(),
                         (se && *se) ? se : "unknown");
     }
+    state->rt->set_emote_external_pose(std::getenv("OA_EMOTE_GPU") == nullptr ||
+                                      std::getenv("OA_EMOTE_GPU")[0] != '0');
 #if defined(__OHOS__)
     {
         int dw = 0, dh = 0, ww = 0, wh = 0;

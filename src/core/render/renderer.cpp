@@ -167,6 +167,9 @@ void RenderEngine::drain_async_decodes()
         decoded_miss_.insert(name);
         ++async_failed_;
     }
+    // Groups may have been baked while an image was still pending. A new
+    // decode must invalidate those bakes as well as wake the host's repaint.
+    if (!done.empty()) render_clear_tex_cache();
 }
 
 bool RenderEngine::create_renderer(SDL_Window* ctx,
@@ -254,8 +257,9 @@ void RenderEngine::release_all()
         if (t) backend_->destroy_texture(t);
     // canvas textures are also listed in `textures` (destroyed above);
     // the atlas textures are owned by emote_atlases_ alone.
-    for (auto& [k, t] : emote_atlases_)
-        if (t) backend_->destroy_texture(t);
+    for (auto& [k, cache] : emote_atlases_)
+        for (auto t : cache.sources)
+            if (t) backend_->destroy_texture(t);
     // 1x1 solid textures + intermediate-group bakes were torn down implicitly
     // at process exit before the abstraction; destroy them explicitly here so
     // every backend texture dies before the renderer does (同销毁集，仅提前).
@@ -871,6 +875,7 @@ size_t RenderEngine::draw_scene(const oa::render::Compositor& sc, double global_
     // tables are compare_ids-sorted, so this pre-order is the flat draw
     // order, scene creation keeps parents before children).
     if (!backend_) return 0;
+    prune_emote_textures(sc);
     // 分相计时（P1,OA_PROFILE）：scene = 本次调用总时长 − 文本段
     // （文本唯一绘制点 draw_node_text，见该函数的计时注释）。
     const auto prof_t0 = std::chrono::steady_clock::now();
@@ -999,108 +1004,108 @@ RenderEngine::FontCacheStats RenderEngine::font_cache_stats() const
     return out;
 }
 
+void RenderEngine::prune_emote_textures(const oa::render::Compositor& scene) {
+    // This registry includes CPU uploads with empty atlas storage. Visit
+    // only character layers, without scanning the entire asset texture cache.
+    for (auto it = emote_atlases_.begin(); it != emote_atlases_.end();) {
+        const auto* layer = scene.find(it->first.name);
+        if (layer && layer->content == LayerContent::EmoteCanvas) { ++it; continue; }
+        const auto texture = textures.find(it->first);
+        if (texture != textures.end()) {
+            backend_->destroy_texture(texture->second);
+            textures.erase(texture);
+        }
+        emote_canvas_.erase(it->first);
+        for (auto tex : it->second.sources)
+            if (tex) backend_->destroy_texture(tex);
+        it = emote_atlases_.erase(it);
+    }
+}
+
 bool RenderEngine::emote_render_parts(const oa::render::TextureKey& key,
                                       const oa::emote::EmoteFile& file,
                                       const std::vector<oa::emote::EmoteDrawPart>& parts,
                                       int w, int h) {
     if (!backend_ || w <= 0 || h <= 0 || key.empty()) return false;
-    // PSB identity in the atlas key (research/132). OA_EMOTE_ATLAS_KEY=legacy
-    // keeps the pre-fix layer-only key so the old behaviour stays reachable as
-    // an A/B arm. Latched once, like the other emote switches.
+    // Validate the whole pose before accepting an incomplete GPU result.
+    for (const auto& part : parts) {
+        if (part.source < 0 || size_t(part.source) >= file.sources.size() ||
+            !file.sources[size_t(part.source)]) return false;
+        const auto& src = *file.sources[size_t(part.source)];
+        if (part.icon < 0 || size_t(part.icon) >= src.icons.size() ||
+            part.verts.size() < 3 || part.verts.size() % 3 != 0) return false;
+    }
     static const bool atlas_key_legacy = [] {
         const char* v = std::getenv("OA_EMOTE_ATLAS_KEY");
         return v && std::strcmp(v, "legacy") == 0;
     }();
     const uint64_t file_uid = atlas_key_legacy ? 0 : file.uid();
-    // Drop this layer's textures that belong to another PSB (the game swapped
-    // the character file behind the same layer id): they are unreachable now
-    // and would otherwise leak one atlas set per costume change.
-    if (!atlas_key_legacy) {
-        for (auto it = emote_atlases_.begin(); it != emote_atlases_.end();) {
-            if (it->first.layer == key && it->first.file != file_uid) {
-                if (std::getenv("OA_EMOTE_DEBUG"))
-                    std::fprintf(stderr,
-                                 "[emote] stale atlas dropped layer='%s' src=%d "
-                                 "file_uid=%llu -> %llu\n",
-                                 key.name.c_str(), it->first.source,
-                                 (unsigned long long)it->first.file,
-                                 (unsigned long long)file_uid);
-                if (it->second) backend_->destroy_texture(it->second);
-                it = emote_atlases_.erase(it);
-            } else {
-                ++it;
-            }
-        }
+    auto& cache = emote_atlases_[key];
+    if (cache.file != file_uid) {
+        for (auto tex : cache.sources)
+            if (tex) backend_->destroy_texture(tex);
+        cache.sources.clear();
+        cache.file = file_uid;
     }
-    // canvas (offscreen target) registered under the layer's TextureKey
+    if (cache.sources.size() < file.sources.size()) cache.sources.resize(file.sources.size());
+    for (const auto& part : parts) {
+        auto& atlas = cache.sources[size_t(part.source)];
+        if (atlas) continue;
+        auto& src = *file.sources[size_t(part.source)];
+        std::string err;
+        if (!file.ensure_atlas(&src, &err) || src.rgba.empty() ||
+            src.textureWidth <= 0 || src.textureHeight <= 0) return false;
+        atlas = backend_->create_texture(src.textureWidth, src.textureHeight, TextureAccess::Static);
+        if (!atlas) return false;
+        backend_->update_texture(atlas, src.rgba.data(), src.textureWidth * 4);
+        backend_->set_texture_blend(atlas, BlendMode::Blend);
+    }
     TextureRef canvas = nullptr;
     const auto ct = emote_canvas_.find(key);
-    if (ct != emote_canvas_.end()) canvas = ct->second;
+    if (ct != emote_canvas_.end()) {
+        float tw = 0, th = 0;
+        if (backend_->texture_size(ct->second, &tw, &th) && int(tw) == w && int(th) == h)
+            canvas = ct->second;
+    }
     if (!canvas) {
+        // Allocate the replacement first: allocation failure leaves the old
+        // displayed frame available until the host can render a CPU fallback.
         canvas = backend_->create_texture(w, h, TextureAccess::Target);
         if (!canvas) return false;
-        backend_->set_texture_blend(canvas, BlendMode::Blend);
-        // take over the key from any CPU-uploaded texture
+        backend_->set_texture_blend(canvas, BlendMode::Premul);
         const auto old = textures.find(key);
-        if (old != textures.end() && old->second != canvas) {
-            if (emote_canvas_.find(key) == emote_canvas_.end())
-                backend_->destroy_texture(old->second);
-            textures.erase(old);
-        }
+        if (old != textures.end() && old->second != canvas)
+            backend_->destroy_texture(old->second);
         emote_canvas_[key] = canvas;
         textures[key] = canvas;
     }
-    // draw into the canvas: clear transparent, then parts in draw order
     TextureRef prev_target = backend_->current_target();
+    IRect prev_clip{};
+    const bool had_clip = backend_->clip_enabled();
+    if (had_clip) prev_clip = backend_->clip_rect();
     backend_->set_target(canvas);
+    backend_->clear_clip();
     backend_->set_draw_blend(BlendMode::None);
     backend_->set_draw_color(0, 0, 0, 0);
     backend_->clear();
     backend_->set_draw_blend(BlendMode::Blend);
-    backend_->clear_clip();
     for (const auto& part : parts) {
-        if (part.source < 0 || part.source >= int(file.sources.size())) continue;
-        const oa::emote::EmoteSource& src = *file.sources[size_t(part.source)];
-        if (part.icon < 0 || part.icon >= int(src.icons.size())) continue;
-        if (part.verts.size() < 3) continue;
-        const RenderEngine::EmoteAtlasKey akey{key, part.source, file_uid};
-        TextureRef atlas = nullptr;
-        const auto ai = emote_atlases_.find(akey);
-        if (ai != emote_atlases_.end()) atlas = ai->second;
-        if (!atlas) {
-            std::string err;
-            if (!file.ensure_atlas(const_cast<oa::emote::EmoteSource*>(&src), &err))
-                continue;
-            if (src.rgba.empty() || src.textureWidth <= 0 || src.textureHeight <= 0) continue;
-            atlas = backend_->create_texture(src.textureWidth, src.textureHeight,
-                                             TextureAccess::Static);
-            if (!atlas) continue;
-            backend_->update_texture(atlas, src.rgba.data(),
-                                     src.textureWidth * 4);
-            backend_->set_texture_blend(atlas, BlendMode::Blend);
-            emote_atlases_[akey] = atlas;
-        }
-        const oa::emote::EmoteIcon& ic = src.icons[size_t(part.icon)];
-        std::vector<Vertex> verts;
-        verts.reserve(part.verts.size());
+        const auto& src = *file.sources[size_t(part.source)];
+        const auto& ic = src.icons[size_t(part.icon)];
+        emote_vertices_.resize(part.verts.size());
         const float a = float(std::clamp(part.alpha, 0.0, 1.0));
-        for (const auto& v : part.verts) {
-            // the atlas mapping comes from the same single
-            // helper the CPU raster uses — (left + u*width)/texW with no trim
-            // compensation term (the format has none).
+        for (size_t i = 0; i < part.verts.size(); ++i) {
+            const auto& v = part.verts[i];
             double tu = 0, tv = 0;
             oa::emote::emote_icon_uv_to_atlas(ic, src.textureWidth,
-                                                     src.textureHeight, v.u, v.v, &tu, &tv);
-            Vertex sv;
-            sv.pos = {float(v.x), float(v.y)};
-            sv.color = {1.0f, 1.0f, 1.0f, a};
-            sv.uv = {float(tu), float(tv)};
-            verts.push_back(sv);
+                                             src.textureHeight, v.u, v.v, &tu, &tv);
+            emote_vertices_[i] = {{float(v.x), float(v.y)}, {1, 1, 1, a}, {float(tu), float(tv)}};
         }
-        backend_->draw_geometry(atlas, verts.data(), int(verts.size()),
-                                nullptr, 0);
+        backend_->draw_geometry(cache.sources[size_t(part.source)], emote_vertices_.data(),
+                                int(emote_vertices_.size()), nullptr, 0);
     }
     backend_->set_target(prev_target);
+    restore_render_clip(had_clip, prev_clip);
     return true;
 }
 
@@ -1146,6 +1151,7 @@ bool RenderEngine::upload_host_frame(const oa::render::TextureKey& key, int w, i
                          (void*)backend_.get(), key.name.c_str(), w, h, (void*)rgba);
         return false;
     }
+    if (key.domain == TextureKey::Domain::EmoteCanvas) emote_atlases_.try_emplace(key);
     // every frame upload RECREATES the streaming texture
     // (destroy + fresh) instead of updating the existing object in place.
     // In-place refreshes of a reused texture (lock write, also update) were
@@ -1554,21 +1560,26 @@ size_t RenderEngine::draw_one(const oa::render::Layer& l, const oa::render::Affi
     if (!tex) return 0;
     const LocalQuad q = quad_for_layer(l);
     if (!q.has) return 0;
+    const bool premul = l.content == LayerContent::EmoteCanvas &&
+                         emote_canvas_.count(EmoteContent::canvas_key(l.id)) != 0;
     backend_->set_texture_alpha_mod(tex, alpha_byte(op));
     // lyprop colormultiply (research: thyt 消息窗调色): texture color
     // mod 乘色作用于普通层绘制;无 colormultiply 时复位(纹理可能复用)。
     if (const std::string* cmv = layer_prop(l, "colormultiply")) {
         if (const auto cm = color_multiply_rgb(*cmv)) {
             backend_->set_texture_color_mod(tex,
-                uint8_t((*cm)[0] * 255.0 + 0.5),
-                uint8_t((*cm)[1] * 255.0 + 0.5),
-                uint8_t((*cm)[2] * 255.0 + 0.5));
+                alpha_byte((*cm)[0] * (premul ? op : 1.0)),
+                alpha_byte((*cm)[1] * (premul ? op : 1.0)),
+                alpha_byte((*cm)[2] * (premul ? op : 1.0)));
         } else {
-            backend_->set_texture_color_mod(tex, 255, 255, 255);
+            const uint8_t c = premul ? alpha_byte(op) : 255;
+            backend_->set_texture_color_mod(tex, c, c, c);
         }
     } else {
-        backend_->set_texture_color_mod(tex, 255, 255, 255);
+        const uint8_t c = premul ? alpha_byte(op) : 255;
+        backend_->set_texture_color_mod(tex, c, c, c);
     }
+    if (premul) backend_->set_texture_blend(tex, BlendMode::Premul);
     if (t.is_plain_translation()) {
         // axis-aligned unit-scale: exact legacy dst-rect path keeps the
         // pixel baselines stable

@@ -22,6 +22,8 @@
 //   OA_AQ_VOL     bgm bus volume (default 1.0)
 //   OA_AQ_LOOP    1/0 loop the asset (default 1)
 //   OA_AQ_DEVICE  1 = open a real audio device (default 0: silent, no pacer)
+//   OA_AQ_WORKERS enable decode prefetch workers (default 0)
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -35,6 +37,7 @@
 #include "SDL3/SDL.h"
 
 #include "core/media/audio.h"
+#include "core/media/decode_pool.h"
 
 namespace {
 
@@ -83,9 +86,13 @@ int main() {
     const bool loop = std::atoi(env_or("OA_AQ_LOOP", "1")) != 0;
     const bool use_device = std::atoi(env_or("OA_AQ_DEVICE", "0")) != 0;
 
+    const int workers=std::atoi(env_or("OA_AQ_WORKERS", "0"));
+    oa::media::DecodePool pool(workers);
     oa::media::MediaPlayers mp;
     oa::media::AudioEngine ae;
-    mp.set_loader([&](const std::string& logical) { return read_file(asset); });
+    std::atomic<unsigned> reads{0};
+    mp.set_decode_pool(workers>0?&pool:nullptr);
+    mp.set_loader([&](const std::string&) { ++reads;return read_file(asset); });
     if (use_device) {
         if (!mp.init()) {
             std::printf("[aq] no audio device available\n");
@@ -122,17 +129,19 @@ int main() {
         ae.update(delta);
         mp.update(delta, ae, nullptr);
     }
+    const size_t players=mp.active_players();
+    mp.stop_all(); // retire workers before the loader's captures are destroyed
     const double wall_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("[aq] asset=%s ticks=%llu fade=%llums gain=%d loop=%d "
                 "bgm_playing=%d players=%zu wall=%.2fs refill=%d target=%zu "
-                "paced_out=%llu refill_frames=%llu callbacks=%llu underruns=%llu\n",
+                "paced_out=%llu refill_frames=%llu callbacks=%llu underruns=%llu workers=%d reads=%u\n",
                 name.c_str(), (unsigned long long)ticks, (unsigned long long)fade_ms,
-                gain, loop ? 1 : 0, ae.is_bgm_playing() ? 1 : 0, mp.active_players(),
+                gain, loop ? 1 : 0, ae.is_bgm_playing() ? 1 : 0, players,
                 wall_s, mp.mix_refill_enabled() ? 1 : 0, mp.mix_target_frames(),
                 (unsigned long long)mp.paced_out_ticks(),
                 (unsigned long long)mp.refill_frames(), mp.device_callbacks(),
-                (unsigned long long)mp.device_underruns(0));
+                (unsigned long long)mp.device_underruns(0),workers,reads.load());
     mp.release();
     return 0;
 }

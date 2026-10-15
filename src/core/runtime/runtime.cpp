@@ -124,7 +124,13 @@ GameRuntime::RuntimeState::RuntimeState(GameRuntime* rt,
 GameRuntime::GameRuntime(std::shared_ptr<const oa::fs::IFileSystem> fs)
     : s_(std::make_unique<RuntimeState>(this, std::move(fs))) {}
 
-GameRuntime::~GameRuntime() = default;
+GameRuntime::~GameRuntime() {
+    // Worker loaders capture RuntimeState. Retire/join them while its file
+    // system and all loader dependencies are still alive.
+    s_->video().stop_all_videos();
+    s_->media_players().stop_all();
+    s_->enable_decode_pool(0);
+}
 
 // ---- 公开方法：逐个转发 ----------------------------------------------------
 
@@ -197,6 +203,7 @@ oa::media::VideoEngine& GameRuntime::video() { return s_->video(); }
 const oa::media::VideoEngine& GameRuntime::video() const { return s_->video(); }
 const std::map<std::string, GameRuntime::EmoteLayerState>& GameRuntime::emote_layers() const { return s_->emote_layers(); }
 size_t GameRuntime::emote_layer_events() const { return s_->emote_layer_events(); }
+void GameRuntime::set_emote_external_pose(bool enabled) { s_->set_emote_external_pose(enabled); }
 oa::media::MediaPlayers& GameRuntime::media_players() { return s_->media_players(); }
 void GameRuntime::set_media_loader(std::function<std::optional<std::vector<uint8_t>>(const std::string&)> loader) { s_->set_media_loader(std::move(loader)); }
 size_t GameRuntime::media_events() const { return s_->media_events(); }
@@ -956,8 +963,13 @@ void GameRuntime::RuntimeState::tick(uint64_t delta_ms, const FrameInput& in) {
                                      : "?",
                                  interpreter_->current_line(), q.c_str());
                 }
-                if (interpreter_->has_queued_tags() && !queue_click_park) {
-                    drain_parked_queue();
+                // A queue-sourced click holds its deferred continuation, but
+                // fresh e:tag commands from UI/input callbacks still run.
+                // Draining just that immediate prefix lets a menu's [call]
+                // establish its normal barrier without advancing the story.
+                if (interpreter_->has_queued_tags() &&
+                    (!queue_click_park || interpreter_->has_immediate_tags())) {
+                    drain_parked_queue(queue_click_park);
                 }
                 // A queued save/load must reach the save domain before any
                 // continuation runs, including a zero-time dispatch wait.
@@ -1106,7 +1118,7 @@ void GameRuntime::RuntimeState::run_until_wait() {
     }
 }
 
-void GameRuntime::RuntimeState::drain_parked_queue() {
+void GameRuntime::RuntimeState::drain_parked_queue(bool immediate_only) {
     if (!interpreter_) return;
     in_parked_drain_ = true;
     bool saw_call = false;
@@ -1115,16 +1127,19 @@ void GameRuntime::RuntimeState::drain_parked_queue() {
     auto settle = [&] {
         saw_call |= interpreter_->queued_saw_call();
         saw_jump |= interpreter_->queued_saw_jump();
-        settle_inline_event_frame(paused, interpreter_->has_queued_tags(), saw_call,
+        const bool pending = immediate_only ? interpreter_->has_immediate_tags()
+                                            : interpreter_->has_queued_tags();
+        settle_inline_event_frame(paused, pending, saw_call,
                                   saw_jump);
     };
     int guard = 0;
-    while (interpreter_->has_queued_tags() && guard++ < 64) {
+    while ((immediate_only ? interpreter_->has_immediate_tags()
+                           : interpreter_->has_queued_tags()) && guard++ < 64) {
         const std::string* script_before = interpreter_->current_script();
         const size_t line_before = interpreter_->current_line();
         const size_t stack_before = interpreter_->call_stack().size();
         const auto prof_t0 = std::chrono::steady_clock::now();
-        const oa::runtime::ExecutionResult r = interpreter_->run_queued();
+        const oa::runtime::ExecutionResult r = interpreter_->run_queued(immediate_only);
         if (profile_on_) {
             tick_profile_.script_us += uint64_t(std::chrono::duration_cast<
                 std::chrono::microseconds>(std::chrono::steady_clock::now() - prof_t0)
@@ -2346,7 +2361,9 @@ GameRuntime::RuntimeState::PointerConsumption GameRuntime::RuntimeState::process
             }
         }
     }
-    if (in.left_down && pointer_moved && !drag_layer_.empty()) {
+    // drag_begin already delivered the press sample, even when the press
+    // arrived with pointer motion. Do not send it twice in the same frame.
+    if (in.left_down && pointer_moved && !drag_layer_.empty() && !pc.drag_handled) {
         drag_update(mx, my);
         pc.drag_handled = true;
     }
@@ -2359,7 +2376,15 @@ GameRuntime::RuntimeState::PointerConsumption GameRuntime::RuntimeState::process
 
     // --- global push handlers for every key-down edge  ----
     std::vector<int> key_edges(down_edges_.begin(), down_edges_.end());
+    // Legacy save UIs turn a stationary thumbnail release into virtual key
+    // 146 (overrideKey status=32). It must reach its registered setonpush
+    // callback as well as the wait machine's generic decide edge.
+    for (const auto& [key, bits] : overrides_) {
+        const int prev = prev_overrides_.count(key) ? prev_overrides_.at(key) : 0;
+        if ((bits & 32) && !(prev & 32)) key_edges.push_back(key);
+    }
     std::sort(key_edges.begin(), key_edges.end());
+    key_edges.erase(std::unique(key_edges.begin(), key_edges.end()), key_edges.end());
     for (const int key : key_edges) {
         // right button / ESC first walk the engine rclick chain (hide
         // recovery or the configured rclick script); only when unconsumed does
@@ -2821,6 +2846,10 @@ bool GameRuntime::RuntimeState::drag_begin(const std::string& layer_id, bool for
     if (row)
         dispatch_layer_row(layer_id, *row, "dragin",
                            {{"drag", "1"}, {"id", layer_id}}, PointerDispatch::Kind::DragIn);
+    // A press is the first drag sample even before any pointer motion. The
+    // game's drag handler records the originating slot for a tap's release;
+    // skipping it left save_thumb_dragout with sys.save.btn == nil.
+    if (drag_layer_ == layer_id) drag_update(double(mouse_x_), double(mouse_y_));
     return true;
 }
 

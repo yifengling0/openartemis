@@ -9,6 +9,13 @@
 # See docs/TESTING.md.
 find_package(Freetype REQUIRED)
 
+set(OA_TEST_EUSTIA_PFS "" CACHE FILEPATH "Legacy Eustia game root.pfs")
+add_executable(eustia_save_ui_test eustia_save_ui_test.cpp)
+target_link_libraries(eustia_save_ui_test PRIVATE libopenartemis)
+add_test(NAME eustia_save_ui COMMAND eustia_save_ui_test)
+set_tests_properties(eustia_save_ui PROPERTIES
+  ENVIRONMENT "OA_TEST_EUSTIA_PFS=${OA_TEST_EUSTIA_PFS}" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+
 # Resource tiering (2026-09): heavy real-game tests are serialized by default
 # (memory-safe on modest machines). Machines with ample RAM can build with
 # -DOA_TEST_SERIALIZE_HEAVY=OFF and run ctest -jN for speed — the fpm tests
@@ -142,6 +149,14 @@ endif()
 set_tests_properties(emote_timeline PROPERTIES
   ENVIRONMENT "OA_TEST_TG3_PFS=${OA_TEST_TG3_PFS};OA_TEST_SLNY_PFS=${OA_TEST_SLNY_PFS}"
   SKIP_RETURN_CODE 77 ${_OA_RS})
+
+# Real TG3 Lua/API contracts; the script volume is useful even without PSBs.
+set(OA_TEST_TG3_SCRIPT_PFS "" CACHE FILEPATH "TG3 root.pfs containing the e-mote Lua framework and voice CSVs")
+add_executable(tg3_emote_script_test tg3_emote_script_test.cpp)
+target_link_libraries(tg3_emote_script_test PRIVATE libopenartemis)
+add_test(NAME tg3_emote_script COMMAND tg3_emote_script_test)
+set_tests_properties(tg3_emote_script PROPERTIES
+  ENVIRONMENT "OA_TEST_TG3_SCRIPT_PFS=${OA_TEST_TG3_SCRIPT_PFS}" SKIP_RETURN_CODE 77)
 
 # E9 diagnostic: dumps slant/UD axis keyframes + idle-entry head/body geometry
 # (report-only executable; not registered as a ctest).

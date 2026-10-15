@@ -398,6 +398,8 @@ void test_rt_drag_chain_and_move() {
     h.tick(70, 70, true, true);
     check(h.notes_of(oa::runtime::GameRuntime::PointerDispatch::Kind::DragIn) == 1,
           "RT4 dragin on left-down over the draggable knob");
+    check(h.notes_of(oa::runtime::GameRuntime::PointerDispatch::Kind::DragMove) == 1,
+          "RT4 press delivers an initial drag sample without pointer motion");
     check(h.lua_string("oa_log").find("drag:pin:1;") != std::string::npos,
           "RT4 dragin Lua (drag=1, id) called");
     // drag to 110,70 while held: knob follows the pointer delta (60 + 40)
@@ -455,6 +457,27 @@ void test_rt_global_push_and_filter_verdicts() {
           "RT6 verdict 1 never dispatches");
 }
 
+void test_rt_virtual_decide_dispatches_push_once() {
+    Harness h("*main\n[setonpush key=\"146\" handler=\"calllua\" function=\"virtual_push\"]\n[stop]\n");
+    h.warm();
+    h.run_lua(R"(
+function virtual_push(e,p) oa_log=(oa_log or '')..p.key..';' end
+function virtual_frame(e)
+    if inject then e:overrideKey{key=146,status=32} inject=nil end
+end
+function bind_virtual(e) e:setEventHandler{onEnterFrame='virtual_frame'} end
+)");
+    h.call_lua("bind_virtual");
+    h.run_lua("inject=true");
+    h.tick(-5,-5);
+    check(h.lua_string("oa_log")=="146;","RT8 virtual decide reaches its registered push handler");
+    h.tick(-5,-5);
+    check(h.lua_string("oa_log")=="146;","RT8 virtual decide does not repeat on an idle frame");
+    h.run_lua("inject=true");
+    h.tick(-5,-5,false,false,{146});
+    check(h.lua_string("oa_log")=="146;146;","RT8 physical and virtual edges for the same key dispatch once");
+}
+
 void test_rt_layer_click_swallows_wait_click() {
     // : clicked = left edge && !handled_by_layer ... .
     // A layer click row that handles the edge must NOT release an input wait.
@@ -494,6 +517,7 @@ int main() {
     test_rt_penetration_click_order();
     test_rt_drag_chain_and_move();
     test_rt_global_push_and_filter_verdicts();
+    test_rt_virtual_decide_dispatches_push_once();
     test_rt_layer_click_swallows_wait_click();
     if (failures) {
         std::fprintf(stderr, "input_dispatch_test: %d failure(s)\n", failures);

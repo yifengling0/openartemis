@@ -1253,7 +1253,8 @@ void GlesRenderBackend::draw_geometry(TextureRef t, const Vertex* verts,
     if (!gt || !gt->tex || nverts <= 0 || !verts) return;
     const int count = (indices && nindices > 0) ? nindices : nverts;
     if (count <= 0) return;
-    std::vector<GLfloat_> buf(size_t(count) * 8);
+    geometry_scratch_.resize(size_t(count) * 8);
+    auto& buf = geometry_scratch_;
     for (int i = 0; i < count; ++i) {
         const int j = indices ? indices[i] : i;
         if (j < 0 || j >= nverts) continue;

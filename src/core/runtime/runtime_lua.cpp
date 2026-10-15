@@ -1368,9 +1368,12 @@ int l_emote_layer_method(lua_State* L) {
         lua_pushlstring(L, sout.data(), sout.size());
         return 1;
     }
+    if (std::strcmp(which, "isTimelinePlaying") == 0) {
+        lua_pushboolean(L, out != 0);
+        return 1;
+    }
     if (std::strcmp(which, "getVariable") == 0 ||
         std::strcmp(which, "getTimelinePlaying") == 0 ||
-        std::strcmp(which, "isTimelinePlaying") == 0 ||
         std::strcmp(which, "countVariables") == 0) {
         lua_pushnumber(L, out);
         return 1;

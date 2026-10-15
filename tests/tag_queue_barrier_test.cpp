@@ -112,11 +112,33 @@ void test_immediate_rows_keep_their_prefix() {
     check(var_is(it, "t.game_start", "1"), "deferred jump resolved in the caller");
 }
 
+void test_immediate_drain_keeps_click_continuation_parked() {
+    Interpreter it;
+    it.set_callback([](const Event& e) {
+        return e.kind == Event::Kind::Wait_ ? CallbackResult::Pause
+                                           : CallbackResult::Continue;
+    });
+    it.load_script("main.iet", kCaller);
+    it.start("main.iet", "top");
+    it.enqueue_tag("@", {});
+    it.enqueue_tag("var", {{"name","t.continuation"},{"data","1"}});
+    check(it.run_queued()==ExecutionResult::Wait,"queued click parks the continuation");
+    it.enqueue_tag_immediate("var", {{"name","t.ui"},{"data","1"}});
+    check(it.run_queued(true)==ExecutionResult::Completed,"fresh immediate UI command runs while parked");
+    check(var_is(it,"t.ui","1"),"the immediate UI command took effect");
+    check(!var_is(it,"t.continuation","1"),"immediate drain does not run the post-click continuation");
+    check(it.last_wait_from_queue(),"immediate drain preserves queue wait bookkeeping");
+    check(it.has_queued_tags()&&!it.has_immediate_tags(),"only the deferred continuation remains");
+    it.run_queued();
+    check(var_is(it,"t.continuation","1"),"normal drain still runs the deferred continuation");
+}
+
 }  // namespace
 
 int main() {
     test_queued_call_defers_caller_continuation();
     test_immediate_rows_keep_their_prefix();
+    test_immediate_drain_keeps_click_continuation_parked();
     if (failures) {
         std::fprintf(stderr, "tag_queue_barrier_test: %d failure(s)\n", failures);
         return 1;
