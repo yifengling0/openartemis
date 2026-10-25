@@ -425,11 +425,18 @@ void GameRuntime::RuntimeState::open_project(std::string_view platform) {
         return std::nullopt;
     };
     media_players_->set_loader(
-        [media_probe](const std::string& logical)
+        [fs = fs_](const std::string& logical)
             -> std::optional<std::vector<uint8_t>> {
-            return media_probe(logical, {".ogg", ".mp3", ".wav", ".m4a", ".opus", ".flac"},
-                               "media");
+            // This loader may run on audio workers. Runtime/Lua magic paths
+            // are resolved on the main thread before a snapshot is submitted.
+            if (auto bytes = fs->read(logical)) return bytes;
+            for (const char* ext : {".ogg", ".mp3", ".wav", ".m4a", ".opus", ".flac"})
+                if (auto bytes = fs->read(logical + ext)) return bytes;
+            return std::nullopt;
         });
+    media_players_->set_path_resolver([this](const std::string& logical) {
+        return interpreter_ ? interpreter_->resolve_magic_path(logical) : logical;
+    });
     // The video decoder reads whole asset files through the same face.
     // A missing/undecodable file keeps the logical immediate-finish fallback
     // inside VideoEngine, so project flows never hang on unavailable video.

@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include "core/media/audio_ring.h"
 #include <string>
 #include <vector>
 
@@ -236,7 +237,9 @@ private:
 /// audio.cpp §3; a no-op unless the environment enables the diagnostics. The
 /// host prints the collected summary through
 /// MediaPlayers::print_audio_diag() at shutdown.
-void sink_diag_after_push(int source, SDL_AudioStream* stream, size_t frames);
+void sink_diag_after_push(int source, size_t queued_frames, size_t frames);
+void capture_realtime_mix(const float* samples, size_t frames, size_t level_before,
+                          size_t level_after);
 
 
 /// SDL post-mix hook body (defined in audio.cpp §3 — it also
@@ -313,7 +316,18 @@ public:
             want.samples = Uint16(n);
         else if (const int n = read_samples("VP_DOSBOX_AUDIO_BUFFER_SIZE"))
             want.samples = Uint16(n);
+#if defined(__OHOS__)
+        // Opt in only for this device; other engines keep their current backend.
+        // An explicit SDL hint/environment override can disable it for diagnosis.
+        const char* output_hint = "SDL_OHOS_AUDIO_NONBLOCKING";
+        const char* previous_hint = SDL_GetHint(output_hint);
+        const bool had_hint = previous_hint != nullptr;
+        if (!had_hint) SDL_SetHint(output_hint, "1");
+#endif
         device_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+#if defined(__OHOS__)
+        if (!had_hint) SDL_ResetHint(output_hint);
+#endif
         if (!device_) return false;
         stream_[kStreamMix] = SDL_NewAudioStream(
             AUDIO_F32SYS, 2, 44100, have.format, have.channels, have.freq);
@@ -328,7 +342,12 @@ public:
             period = period * 44100u / size_t(have.freq);
         device_frames_ = period ? period : 1024;
         device_spec_ = have;
-        mix_scratch_.assign(have.size > 0 ? have.size : size_t(want.samples) * 8, 0);
+        mix_scratch_.assign(8192, 0); // callback processes arbitrary lengths in bounded pieces
+        converted_scratch_.resize(8192);
+        const size_t bytes_per_frame = size_t(SDL_AUDIO_BITSIZE(have.format) / 8) * have.channels;
+        const size_t capacity = std::max(size_t(have.size) * 16,
+            size_t(have.freq) * bytes_per_frame * 2);
+        for (auto& pcm : pcm_) pcm = std::make_unique<AudioRing<Uint8>>(capacity);
         std::printf("[audiosink] open want=%dHz fmt=0x%x samples=%u  have=%dHz "
                     "fmt=0x%x samples=%u size=%u target_frames=%zu\n",
                     want.freq, (unsigned)want.format, (unsigned)want.samples,
@@ -381,8 +400,7 @@ public:
         if (!st || frames == 0) return;
         if (bound_ && queued_frames(kStreamMix) > kMixSafetyFrames) {
 #ifdef OA_USE_SDL2
-            std::lock_guard<std::mutex> lock(mutex_);
-            SDL_AudioStreamClear(st);
+            clear_stream(kStreamMix);
 #else
             SDL_ClearAudioStream(st);
 #endif
@@ -401,8 +419,7 @@ public:
         if (!st || frames == 0) return;
         if (bound_ && queued_frames(kStreamMovie) + frames > kMovieBoundFrames) {
 #ifdef OA_USE_SDL2
-            std::lock_guard<std::mutex> lock(mutex_);
-            SDL_AudioStreamClear(st);
+            clear_stream(kStreamMovie);
 #else
             SDL_ClearAudioStream(st);
 #endif
@@ -419,30 +436,37 @@ public:
     void clear_movie() {
         if (!stream_[kStreamMovie]) return;
 #ifdef OA_USE_SDL2
-        std::lock_guard<std::mutex> lock(mutex_);
-        SDL_AudioStreamClear(stream_[kStreamMovie]);
+        clear_stream(kStreamMovie);
 #else
         SDL_ClearAudioStream(stream_[kStreamMovie]);
 #endif
     }
-    /// Frames queued on one bound stream (0 without a device). Audible latency.
-    /// SDL2: locks mutex_. Do not call from the audio callback (use
-    /// queued_frames_locked — the callback already holds mutex_, and a nested
-    /// lock deadlocks the device thread and then the mixer on the next query).
-    size_t queued_frames(int source) const {
+    void clear_mix() {
 #ifdef OA_USE_SDL2
-        std::lock_guard<std::mutex> lock(mutex_);
+        clear_stream(kStreamMix);
+#else
+        if (stream_[kStreamMix]) SDL_ClearAudioStream(stream_[kStreamMix]);
 #endif
+    }
+    bool paused() const {
+#ifdef OA_USE_SDL2
+        return device_ && SDL_GetAudioDeviceStatus(device_) != SDL_AUDIO_PLAYING;
+#else
+        return false;
+#endif
+    }
+    void set_mix_active(bool active) { mix_active_.store(active, std::memory_order_relaxed); }
+    /// Frames queued on one bound stream (0 without a device). Audible latency.
+    /// SDL2 reads atomic PCM-ring cursors; it never waits for a producer.
+    size_t queued_frames(int source) const {
         return queued_frames_locked(source);
     }
-    /// Queue length without taking mutex_. SDL2 audio callback / note_device_pull
-    /// must use this while mutex_ is already held. SDL3 streams are internally
-    /// synchronized, so this is also the postmix path.
+    /// Same atomic queue view, kept for device-capture diagnostics.
     size_t queued_frames_locked(int source) const {
         SDL_AudioStream* st = stream_[source];
         if (!st) return 0;
 #ifdef OA_USE_SDL2
-        const int q = SDL_AudioStreamAvailable(st);
+        const int q = pcm_[source] ? int(pcm_[source]->available()) : 0;
         if (q <= 0) return 0;
         // SDL2 Available() is converted OUTPUT bytes. The mix pacer
         // compares against 44100 stereo frames.
@@ -523,6 +547,19 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         SDL_AudioStreamPut(st, interleaved_stereo,
             (int)(frames * 2 * sizeof(float)));
+        // Conversion and SDL queue allocation happen on the producer. The
+        // callback only consumes committed device-format bytes from the SPSC
+        // ring, so it never waits for this mutex or SDL's converter.
+        auto& pcm = *pcm_[source];
+        for (;;) {
+            const size_t bpf = size_t(SDL_AUDIO_BITSIZE(device_spec_.format) / 8) * device_spec_.channels;
+            size_t count = std::min(pcm.writable(), converted_scratch_.size());
+            count -= count % bpf;
+            if (!count) break;
+            const int got = SDL_AudioStreamGet(st, converted_scratch_.data(), int(count));
+            if (got <= 0) break;
+            pcm.push(converted_scratch_.data(), size_t(got));
+        }
 #else
         SDL_PutAudioStreamData(st, interleaved_stereo,
             (int)(frames * 2 * sizeof(float)));
@@ -531,7 +568,7 @@ private:
         // delivery diagnostics (OA_AUDIO_DIAG) — sample the
         // stream water level after every put (defined in audio.cpp §3; no-op
         // unless the env var enables it).
-        sink_diag_after_push(source, st, frames);
+        sink_diag_after_push(source, queued_frames(source), frames);
     }
     /// bounded push. Before appending, a STANDING backlog
     /// (queued > cap) is dropped, so the stream can never carry a permanent
@@ -547,8 +584,7 @@ private:
         if (!st || frames == 0) return;
         if (bound_ && queued_frames(source) > cap) {
 #ifdef OA_USE_SDL2
-            std::lock_guard<std::mutex> lock(mutex_);
-            SDL_AudioStreamClear(st);
+            clear_stream(source);
 #else
             SDL_ClearAudioStream(st);
 #endif
@@ -564,7 +600,15 @@ private:
     std::atomic<uint64_t> underruns_[kStreamCount] = {};
     std::atomic<uint64_t> device_callbacks_{0};
     std::atomic<uint64_t> last_push_ms_[kStreamCount] = {}; // "stream is live"
+    std::atomic<bool> mix_active_{true};
 #ifdef OA_USE_SDL2
+    void clear_stream(int source) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stream_[source]) SDL_AudioStreamClear(stream_[source]);
+        if (pcm_[source]) pcm_[source]->clear();
+    }
+    std::unique_ptr<AudioRing<Uint8>> pcm_[kStreamCount];
+    std::vector<Uint8> converted_scratch_;
     mutable std::mutex mutex_;
     SDL_AudioSpec device_spec_{};
     std::vector<Uint8> mix_scratch_;

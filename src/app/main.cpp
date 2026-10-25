@@ -1827,6 +1827,9 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     std::printf("[app] opening audio device...\n");
     std::fflush(stdout);
     state->rt->media_players().init();
+#if !defined(__EMSCRIPTEN__)
+    state->rt->media_players().enable_realtime();
+#endif
     std::fflush(stdout);
     // movie (container) audio rides the SAME SDL stream the
     // sound players mix into. VideoEngine pushes its decoded 44100 stereo
@@ -2750,13 +2753,15 @@ SDL_AppResult SDL_AppIterate(void* appstate)
                 auto& mp = state->rt->media_players();
                 const size_t mix = mp.audio_level_frames(0);
                 const size_t mov = mp.audio_level_frames(1);
+                const auto realtime = mp.realtime_stats();
                 // the mix stream's STANDING level is what a
                 // sound started now would suffer; `under` counts the device
                 // callbacks that had to pad a live stream with silence (a hole
                 // in the middle of the sound = the click this revision fixes).
                 std::printf("[audiolat] f=%llu mix=%zu (%.0fms) movie=%zu "
                             "(%.0fms) target=%zu paced_out=%llu refill=%llu "
-                            "cb=%llu under_mix=%llu under_movie=%llu\n",
+                            "cb=%llu under_mix=%llu under_movie=%llu "
+                            "source_short=%llu load_max_us=%llu streams=%zu\n",
                             (unsigned long long)state->frames, mix,
                             double(mix) / 44.1, mov, double(mov) / 44.1,
                             mp.mix_target_frames(),
@@ -2764,7 +2769,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
                             (unsigned long long)mp.refill_frames(),
                             (unsigned long long)mp.device_callbacks(),
                             (unsigned long long)mp.device_underruns(0),
-                            (unsigned long long)mp.device_underruns(1));
+                            (unsigned long long)mp.device_underruns(1),
+                            (unsigned long long)realtime.source_short_frames,
+                            (unsigned long long)realtime.max_load_us,
+                            realtime.active_streams);
             }
         }
     }

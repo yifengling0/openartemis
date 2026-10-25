@@ -31,6 +31,7 @@ namespace oa::media {
 
 class AudioSink;   // device-stream sink owned by MediaPlayers (media_internal.h)
 class DecodePool;  // optional decode-worker host (core/media/decode_pool.h)
+class RealtimeAudio;
 
 // ---------------------------------------------------------------------------
 // §1 sound logic state machine: SoundCategory/FadeState/
@@ -86,6 +87,7 @@ struct SoundChannel {
     /// Channel start time on the audio subsystem clock; [wait se=ID time=N]
     /// counts N from this instant ( started_at_ms).
     uint64_t started_at_ms = 0;
+    uint64_t playback_id = 0; // distinguishes replacements, including same-tick replays
 
     static float gain_to_linear(int32_t raw) {
         return raw > 0 ? float(raw) / 1000.0f : 0.0f;
@@ -200,6 +202,7 @@ private:
     void queue_channel_finish(const SoundChannel& channel);
     State state_;
     std::vector<SoundFinishEvent> pending_finish_;
+    uint64_t next_playback_id_ = 0; // intentionally survives reset/load
 };
 
 /// A-B loop segment naming ([splay] foo_a.ogg -> foo_b.ogg; splay.md).
@@ -248,6 +251,7 @@ private:
 class MediaPlayers {
 public:
     static constexpr int kOutputRate = 44100;
+    MediaPlayers();
 
     // base
     bool init();
@@ -266,6 +270,23 @@ public:
     /// Null = plain
     /// synchronous decode (headless/tests stay byte-identical).
     void set_decode_pool(DecodePool* pool) { pool_ = pool; }
+
+    // Native device hosts opt in after init(). Headless/offline rendering
+    // keeps the deterministic caller-clock path used by PCM regressions.
+    bool enable_realtime();
+    void set_realtime_paused(bool paused);
+    void set_path_resolver(std::function<std::string(const std::string&)> resolver) {
+        path_resolver_ = std::move(resolver);
+        resolved_channels_.clear();
+    }
+    struct RealtimeStats {
+        uint64_t mixed_frames = 0;
+        uint64_t source_short_frames = 0;
+        uint64_t max_load_us = 0;
+        size_t active_streams = 0;
+        uint64_t mixer_waits = 0;
+    };
+    RealtimeStats realtime_stats() const;
 
     /// Natural completion of a non-loop channel: (category, channel id; the
     /// BGM id is "").
@@ -334,7 +355,7 @@ public:
     void stop_all();
 
     /// Number of active decode players (diagnostics/tests).
-    size_t active_players() const { return players_.size(); }
+    size_t active_players() const;
 
     // One decoding channel (implementation detail; definition needed by the
     // runtime dtor through the unique_ptr member).
@@ -346,6 +367,7 @@ public:
         bool loop_play = false;
         std::optional<std::string> loop_file;
         uint64_t started_at_ms = 0;
+        uint64_t playback_id = 0;
 
         // Decode state -----------------------------------------------------------
         std::unique_ptr<VorbisSource> src;
@@ -386,9 +408,18 @@ public:
     };
 
 private:
+    void update_sync(uint64_t delta_ms, AudioEngine& engine, const FinishFn& on_finish);
     std::map<std::string, std::unique_ptr<Player>> players_;
     std::function<std::optional<std::vector<uint8_t>>(const std::string&)> loader_;
     DecodePool* pool_ = nullptr; // optional decode-pool worker host
+    std::unique_ptr<RealtimeAudio> realtime_;
+    std::function<std::string(const std::string&)> path_resolver_;
+    struct ResolvedChannel {
+        SoundChannel original;
+        std::string file;
+        std::optional<std::string> loop_file;
+    };
+    std::map<std::string, ResolvedChannel> resolved_channels_;
     AudioSink* sink_ = nullptr;
     std::vector<float> mix_; // reusable interleaved output block
     double out_frame_frac_ = 0.0; // sub-frame accumulator of the output clock

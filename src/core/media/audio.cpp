@@ -35,6 +35,7 @@
 #include <SDL3/SDL_timer.h>
 
 #include "core/media/decode_pool.h"
+#include "core/media/audio_realtime.h"
 #include "core/media/media_internal.h"
 
 namespace oa::media {
@@ -243,6 +244,7 @@ void AudioEngine::play_bgm(const std::string& file, const BgmConfig& config) {
     state_.bgm_channel = build_channel("bgm", file, SoundCategory::Bgm, config.loop_play,
                                        false, config.gain, config.pan, config.fade_in_ms,
                                        state_.clock_ms);
+    state_.bgm_channel->playback_id = ++next_playback_id_;
 }
 
 bool AudioEngine::stop_bgm(uint64_t fade_time_ms) {
@@ -263,6 +265,7 @@ void AudioEngine::crossfade_bgm(const std::string& file, const BgmConfig& config
     state_.bgm_channel = build_channel("bgm", file, SoundCategory::Bgm, config.loop_play,
                                        false, config.gain, config.pan, config.fade_in_ms,
                                        state_.clock_ms);
+    state_.bgm_channel->playback_id = ++next_playback_id_;
 }
 
 void AudioEngine::fade_bgm_gain(int32_t target_gain_raw, uint64_t time_ms) {
@@ -290,6 +293,7 @@ void AudioEngine::play_se(const std::string& id, const std::string& file,
     SoundChannel channel = build_channel(id, file, SoundCategory::Se, config.loop_play,
                                          config.skippable, config.gain, config.pan,
                                          config.fade_in_ms, state_.clock_ms);
+    channel.playback_id = ++next_playback_id_;
     state_.se_channels.emplace(id, std::move(channel));
 }
 
@@ -333,6 +337,7 @@ void AudioEngine::play_voice(const std::string& id, const std::string& file,
     SoundChannel channel = build_channel(id, file, SoundCategory::Voice, config.loop_play,
                                          config.skippable, config.gain, config.pan,
                                          config.fade_in_ms, state_.clock_ms);
+    channel.playback_id = ++next_playback_id_;
     state_.voice_channels.emplace(id, std::move(channel));
 }
 
@@ -590,7 +595,7 @@ namespace {
 // atomics when disabled.
 // ---------------------------------------------------------------------------
 struct SinkDiag {
-    bool enabled = false;
+    std::atomic<bool> enabled{false};
     std::chrono::steady_clock::time_point t0{};
     std::chrono::steady_clock::time_point last_push{};
     uint64_t puts = 0;
@@ -800,8 +805,8 @@ struct WavWriter {
 };
 
 struct SignalCapture {
-    bool inited = false;
-    bool enabled = false;
+    std::once_flag init_once;
+    std::atomic<bool> enabled{false};
     std::string prefix;
     WavWriter mix, movie, dev;
     std::FILE* tick_csv = nullptr;
@@ -828,25 +833,28 @@ void capture_device(const SDL_AudioSpec* spec, float* buffer, int buflen, AudioS
 
 void capture_begin(AudioSink* sink) {
     SignalCapture& c = g_capture();
-    if (c.inited) return;
-    c.inited = true;
-    const char* p = std::getenv("OA_AUDIO_REC");
-    if (!p || !*p) return;
-    c.prefix = p;
-    const bool ok = c.mix.open(c.prefix + ".mix.wav") &&
-                    c.movie.open(c.prefix + ".movie.wav") &&
-                    c.dev.open(c.prefix + ".dev.wav");
-    c.tick_csv = std::fopen((c.prefix + ".tick.csv").c_str(), "w");
-    c.dev_csv = std::fopen((c.prefix + ".dev.csv").c_str(), "w");
-    if (!ok || !c.tick_csv || !c.dev_csv) {
-        std::fprintf(stderr, "[audiorec] cannot open capture files at %s.*\n", c.prefix.c_str());
-        return;
-    }
-    c.enabled = true;
-    if (c.tick_csv) std::fprintf(c.tick_csv, "t_ms,delta_ms,frames,level_before,level_after,paced\n");
-    if (c.dev_csv) std::fprintf(c.dev_csv, "t_ms,frames_pulled,mix_after,movie_after\n");
-    std::printf("[audiorec] capturing signal face to %s.{mix,movie,dev}.wav "
-                "+ .{tick,dev}.csv\n", c.prefix.c_str());
+    std::call_once(c.init_once, [&] {
+        const char* p = std::getenv("OA_AUDIO_REC");
+        if (!p || !*p) return;
+        c.prefix = p;
+        const bool ok = c.mix.open(c.prefix + ".mix.wav") &&
+                        c.movie.open(c.prefix + ".movie.wav") &&
+                        c.dev.open(c.prefix + ".dev.wav");
+        c.tick_csv = std::fopen((c.prefix + ".tick.csv").c_str(), "w");
+        c.dev_csv = std::fopen((c.prefix + ".dev.csv").c_str(), "w");
+        if (!ok || !c.tick_csv || !c.dev_csv) {
+            if (c.tick_csv) { std::fclose(c.tick_csv); c.tick_csv = nullptr; }
+            if (c.dev_csv) { std::fclose(c.dev_csv); c.dev_csv = nullptr; }
+            c.mix.close(); c.movie.close(); c.dev.close();
+            std::fprintf(stderr, "[audiorec] cannot open capture files at %s.*\n", c.prefix.c_str());
+            return;
+        }
+        std::fprintf(c.tick_csv, "t_ms,delta_ms,frames,level_before,level_after,paced\n");
+        std::fprintf(c.dev_csv, "t_ms,frames_pulled,mix_after,movie_after\n");
+        std::printf("[audiorec] capturing signal face to %s.{mix,movie,dev}.wav "
+                    "+ .{tick,dev}.csv\n", c.prefix.c_str());
+        c.enabled.store(true, std::memory_order_release);
+    });
     (void)sink;
 }
 
@@ -857,6 +865,7 @@ void capture_mix(const float* interleaved, size_t frames) {
         if (!c.enabled) return;
     }
     std::lock_guard<std::mutex> lk(c.mu_mix);
+    if (!c.enabled) return;
     c.mix.write(interleaved, frames);
     ++c.mix_pushes;
     c.mix_frames += frames;
@@ -870,6 +879,7 @@ void capture_tick(uint64_t t_ms, uint64_t delta_ms, size_t frames, size_t level_
         if (!c.enabled) return;
     }
     std::lock_guard<std::mutex> lk(c.mu_mix);
+    if (!c.enabled) return;
     c.t_ms = t_ms;
     if (paced) ++c.paced_ticks;
     if (c.tick_csv) {
@@ -887,6 +897,7 @@ void capture_movie(const float* interleaved, size_t frames) {
         if (!c.enabled) return;
     }
     std::lock_guard<std::mutex> lk(c.mu_movie);
+    if (!c.enabled) return;
     c.movie.write(interleaved, frames);
     ++c.movie_pushes;
     c.movie_frames += frames;
@@ -902,13 +913,14 @@ void capture_device(const SDL_AudioSpec* spec, float* buffer, int buflen,
     if (!spec || spec->freq != 44100 || spec->channels != 2) {
         if (!c.enabled) return;
         std::lock_guard<std::mutex> lk(c.mu_dev);
+        if (!c.enabled) return;
         ++c.dev_fmt_mismatch;
         return;
     }
     if (!c.enabled) return;
     const size_t frames = size_t(buflen) / (2 * sizeof(float));
 #ifdef OA_USE_SDL2
-    // Called from AudioSink::audio_callback with mutex_ held.
+    // Callback-side queue levels are atomic SPSC cursors.
     const size_t mix_after = sink ? sink->queued_frames_locked(AudioSink::kStreamMix) : 0;
     const size_t movie_after = sink ? sink->queued_frames_locked(AudioSink::kStreamMovie) : 0;
 #else
@@ -916,6 +928,7 @@ void capture_device(const SDL_AudioSpec* spec, float* buffer, int buflen,
     const size_t movie_after = sink ? sink->queued_frames(AudioSink::kStreamMovie) : 0;
 #endif
     std::lock_guard<std::mutex> lk(c.mu_dev);
+    if (!c.enabled) return;
     c.dev.write(buffer, frames);
     ++c.dev_callbacks;
     c.dev_frames += frames;
@@ -930,7 +943,7 @@ void capture_device(const SDL_AudioSpec* spec, float* buffer, int buflen,
 
 void capture_end() {
     SignalCapture& c = g_capture();
-    if (!c.enabled) return;
+    if (!c.enabled.exchange(false)) return;
     {
         std::lock_guard<std::mutex> lk(c.mu_mix);
         if (c.tick_csv) { std::fclose(c.tick_csv); c.tick_csv = nullptr; }
@@ -956,10 +969,15 @@ void capture_end() {
                 c.dev_min_movie == UINT64_MAX ? -1ll : (long long)c.dev_min_movie,
                 (unsigned long long)c.dev_fmt_mismatch,
                 (unsigned long long)c.paced_ticks);
-    c.enabled = false;
 }
 
 } // namespace
+
+void capture_realtime_mix(const float* samples, size_t frames, size_t level_before,
+                          size_t level_after) {
+    capture_mix(samples, frames);
+    capture_tick(SDL_GetTicks(), 0, frames, level_before, level_after, false);
+}
 
 void AudioSink::note_device_pull(const SDL_AudioSpec* spec, int buflen) {
     if (!spec || buflen <= 0) return;
@@ -993,34 +1011,32 @@ void SDLCALL AudioSink::audio_callback(void* userdata, Uint8* stream, int len) {
         return;
     }
     SDL_memset(stream, 0, len);
-    if (sink->mix_scratch_.size() < size_t(len))
-        sink->mix_scratch_.resize(size_t(len));
-    std::lock_guard<std::mutex> lock(sink->mutex_);
     const SDL_AudioFormat fmt = sink->device_spec_.format;
     const bool f32 = (fmt == AUDIO_F32SYS || fmt == AUDIO_F32);
     for (int i = 0; i < kStreamCount; ++i) {
-        if (!sink->stream_[i]) continue;
-        const int got = SDL_AudioStreamGet(sink->stream_[i], sink->mix_scratch_.data(), len);
+        if (!sink->pcm_[i]) continue;
+        int total = 0;
+        for (int offset = 0; offset < len;) {
+            const int count = std::min(len - offset, int(sink->mix_scratch_.size()));
+            const int got = int(sink->pcm_[i]->pop(sink->mix_scratch_.data(), size_t(count)));
+            total += got;
+            if (got > 0 && f32) {
+                auto* dst = reinterpret_cast<float*>(stream + offset);
+                const auto* src = reinterpret_cast<const float*>(sink->mix_scratch_.data());
+                for (int s = 0; s < got / int(sizeof(float)); ++s)
+                    dst[s] = std::clamp(dst[s] + src[s], -1.0f, 1.0f);
+            } else if (got > 0) {
+                SDL_MixAudioFormat(stream + offset, sink->mix_scratch_.data(), fmt,
+                                   Uint32(got), SDL_MIX_MAXVOLUME);
+            }
+            offset += count;
+        }
         const uint64_t last = sink->last_push_ms_[i].load(std::memory_order_relaxed);
         // An exactly full read may leave an empty queue without any silence.
         // Count the actual short read, not the queue's level after the pull.
-        if (got < len && last != 0 && SDL_GetTicks() - last <= 250)
+        if (total < len && last != 0 && SDL_GetTicks() - last <= 250 &&
+            (i != kStreamMix || sink->mix_active_.load(std::memory_order_relaxed)))
             ++sink->underruns_[i];
-        if (got <= 0) continue;
-        if (f32) {
-            auto* dst = reinterpret_cast<float*>(stream);
-            auto* src = reinterpret_cast<float*>(sink->mix_scratch_.data());
-            const int n = got / int(sizeof(float));
-            for (int s = 0; s < n; ++s) {
-                const float mixed = dst[s] + src[s];
-                dst[s] = mixed < -1.0f ? -1.0f : (mixed > 1.0f ? 1.0f : mixed);
-            }
-        } else {
-            // Mix whatever the stream had this period. Requiring got==len
-            // dropped short reads as silence (OHOS S16/S32 stutter).
-            SDL_MixAudioFormat(stream, sink->mix_scratch_.data(), fmt,
-                               (Uint32)got, SDL_MIX_MAXVOLUME);
-        }
     }
     sink->note_device_pull(&sink->device_spec_, len);
     if (f32)
@@ -1028,13 +1044,14 @@ void SDLCALL AudioSink::audio_callback(void* userdata, Uint8* stream, int len) {
 }
 #endif
 
-void sink_diag_after_push(int source, SDL_AudioStream* stream, size_t frames) {
+void sink_diag_after_push(int source, size_t queued_frames, size_t frames) {
     SinkDiag& d = g_sink_diag(source);
+    static const bool on = std::getenv("OA_AUDIO_DIAG") != nullptr;
+    if (!on) return;
+    std::lock_guard<std::mutex> lock(d.mu);
     if (!d.enabled) {
         // One-time decision: env gate. The static initializer runs on the
         // first push (any thread); steady-state cost after that is an atomic.
-        static const bool on = std::getenv("OA_AUDIO_DIAG") != nullptr;
-        if (!on) return;
         d.enabled = true;
         d.t0 = std::chrono::steady_clock::now();
         d.last_push = d.t0;
@@ -1049,12 +1066,7 @@ void sink_diag_after_push(int source, SDL_AudioStream* stream, size_t frames) {
     // SDL_GetAudioStreamQueued returns BYTES (no framesize conversion in
     // SDL3); normalize to 44100 Hz stereo f32 frames (8 B/frame) so the
     // diagnostics read in the engine's sample unit.
-    const int level =
-#ifdef OA_USE_SDL2
-        SDL_AudioStreamAvailable(stream) / 8;
-#else
-        SDL_GetAudioStreamQueued(stream) / 8;
-#endif
+    const int level = int(queued_frames);
     const uint64_t t_ms = uint64_t(
         std::chrono::duration_cast<std::chrono::milliseconds>(now - d.t0).count());
     if (gap_us > d.max_gap_us) d.max_gap_us = gap_us;
@@ -1065,11 +1077,9 @@ void sink_diag_after_push(int source, SDL_AudioStream* stream, size_t frames) {
     if (level >= 0 && uint64_t(level) < frames) ++d.dry_hits;
     if (level >= 0 && level < 200) ++d.low_hits; // <200 frames (~4.5 ms)
     if (d.dry_hits <= 64 || level < 200) {
-        std::lock_guard<std::mutex> lk(d.mu);
         if (d.ring.size() >= kDiagRing) d.ring.pop_front();
         d.ring.push_back(SinkDiag::Ev{uint32_t(t_ms), uint32_t(gap_us), level});
     }
-    std::lock_guard<std::mutex> lk(d.mu);
     const size_t sec = size_t(t_ms / 1000);
     if (d.secs.size() <= sec) d.secs.resize(sec + 1);
     SinkDiag::Sec& s = d.secs[sec];
@@ -1085,9 +1095,19 @@ void sink_diag_after_push(int source, SDL_AudioStream* stream, size_t frames) {
 }
 
 void MediaPlayers::print_audio_diag(const char* label) const {
+    if (realtime_ && std::getenv("OA_AUDIO_DIAG")) {
+        const auto stats = realtime_stats();
+        std::printf("[audiodiag] %s [realtime]: mixed=%llu source_short=%llu "
+                    "load_max_us=%llu streams=%zu waits=%llu\n", label ? label : "",
+                    (unsigned long long)stats.mixed_frames,
+                    (unsigned long long)stats.source_short_frames,
+                    (unsigned long long)stats.max_load_us, stats.active_streams,
+                    (unsigned long long)stats.mixer_waits);
+    }
     for (int src = 0; src < AudioSink::kStreamCount; ++src) {
         const SinkDiag& d = g_sink_diag(src);
         if (!d.enabled) continue;
+        std::lock_guard<std::mutex> diagnostic_lock(const_cast<SinkDiag&>(d).mu);
         std::printf("[audiodiag] %s [%s]: puts=%llu frames=%llu (%.2fs) dry=%llu "
                     "low<200=%llu max_gap=%lluus\n",
                     label ? label : "", kDiagSourceName[src],
@@ -1118,7 +1138,6 @@ void MediaPlayers::print_audio_diag(const char* label) const {
             ++shown;
         }
         if (shown == 0) std::printf("[audiodiag]   (no seconds recorded)\n");
-        std::lock_guard<std::mutex> lk(const_cast<SinkDiag&>(d).mu);
         size_t printed = 0;
         for (auto it = d.ring.rbegin(); it != d.ring.rend() && printed < 8; ++it) {
             if (it->level < 0 || uint32_t(it->level) < 200) {
@@ -1359,6 +1378,61 @@ std::shared_ptr<MediaPlayers::Player::Prefetch> start_prefetch(
 
 } // namespace
 
+size_t decode_audio_block(MediaPlayers::Player& p, const RealtimeAudio::Loader& loader,
+                         float* output, size_t frames) {
+    if (!frames || !p.src || p.unplayable || p.silent_forever) return 0;
+    const double ratio = p.rate / double(MediaPlayers::kOutputRate);
+    prepare_window(p, loader, size_t(std::floor(p.p)),
+                   size_t(std::floor(p.p + double(frames - 1) * ratio)));
+    size_t count = frames;
+    if (p.zero_from != kNoFrame) {
+        const double remaining = (double(p.zero_from) - p.p) / ratio;
+        count = remaining > 0 ? std::min(frames, size_t(std::ceil(remaining))) : 0;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const double pos = p.p + double(i) * ratio;
+        const size_t k = size_t(std::floor(pos));
+        const float fraction = float(pos - double(k));
+        for (int c = 0; c < 2; ++c) {
+            const int channel = p.avail_ch == 1 ? 0 : c;
+            const float a = frame_sample(p, k, channel), b = frame_sample(p, k + 1, channel);
+            output[i * 2 + size_t(c)] = a + (b - a) * fraction;
+        }
+    }
+    p.p += double(count) * ratio;
+    return count;
+}
+
+MediaPlayers::MediaPlayers() = default;
+
+bool MediaPlayers::enable_realtime() {
+#if !defined(__EMSCRIPTEN__)
+    if (std::getenv("OA_AUDIO_FRAME_FEED")) return false; // diagnostic A/B control
+    if (realtime_) return true;
+    if (!sink_ || !loader_) return false;
+    try {
+        realtime_ = std::make_unique<RealtimeAudio>(*sink_, loader_);
+        std::printf("[audio] realtime mixer enabled: fixed blocks, async load/decode\n");
+        return true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[audio] realtime mixer unavailable: %s\n", e.what());
+    }
+#endif
+    return false;
+}
+
+MediaPlayers::RealtimeStats MediaPlayers::realtime_stats() const {
+    return realtime_ ? realtime_->stats() : RealtimeStats{};
+}
+
+void MediaPlayers::set_realtime_paused(bool paused) {
+    if (realtime_) realtime_->set_paused(paused);
+}
+
+size_t MediaPlayers::active_players() const {
+    return realtime_ ? realtime_->stats().active_streams : players_.size();
+}
+
 bool MediaPlayers::init()
 {
     // SDL3 audio output subsystem + device sink. Windowed hosts try the
@@ -1446,6 +1520,7 @@ void MediaPlayers::set_mix_refill_enabled(bool on) { mix_refill_enabled_ = on; }
 /// starve — the same residual the earlier pacer already documented ("the delay
 /// inside a slow segment is at least the frame time").
 size_t MediaPlayers::mix_target_frames() const {
+    if (realtime_) return realtime_->target_frames();
     if (!sink_) return 0;
     const size_t dev = sink_->device_frames() ? sink_->device_frames() : 1024;
     if (!mix_refill_enabled_) return 2 * dev; // one-sided law (negative control)
@@ -1459,6 +1534,7 @@ size_t MediaPlayers::mix_target_frames() const {
 
 void MediaPlayers::release()
 {
+    realtime_.reset(); // join every producer before closing its sink/loader dependencies
     capture_end(); // flush + report the signal capture first
     if (sink_)
     {
@@ -1477,12 +1553,15 @@ void MediaPlayers::release()
 }
 
 MediaPlayers::~MediaPlayers() {
+    release();
     // Retire prefetch workers (they outlive their Player through the shared
     // prefetch state) so a pool destructor can never join a stuck job.
     for (auto& [key, p] : players_) cancel_prefetch(*p);
 }
 
 void MediaPlayers::stop_all() {
+    if (realtime_) realtime_->stop_all();
+    resolved_channels_.clear();
     for (auto& [key, p] : players_) cancel_prefetch(*p);
     players_.clear();
 }
@@ -1529,6 +1608,53 @@ void MediaPlayers::push_video_audio(const float* interleaved_stereo, size_t fram
     sink_->push_movie(src, frames); // bounded: kMovieBoundFrames
 }
 void MediaPlayers::update(uint64_t delta_ms, AudioEngine& engine, const FinishFn& on_finish) {
+    if (realtime_) realtime_->poll(engine, on_finish);
+    if (realtime_ || path_resolver_) {
+        auto snapshot = engine.state();
+        for (auto it = resolved_channels_.begin(); it != resolved_channels_.end();) {
+            const auto& original = it->second.original;
+            bool active = false;
+            if (original.category == SoundCategory::Bgm) {
+                active = snapshot.bgm_channel && snapshot.bgm_channel->playing;
+            } else {
+                const auto& channels = original.category == SoundCategory::Se ?
+                    snapshot.se_channels : snapshot.voice_channels;
+                const auto found = channels.find(original.id);
+                active = found != channels.end() && found->second.playing;
+            }
+            if (!active) it = resolved_channels_.erase(it);
+            else ++it;
+        }
+        auto resolve = [&](SoundChannel& ch) {
+            if (!ch.playing || !path_resolver_) return;
+            const auto key = channel_key(ch.category, ch.id);
+            auto found = resolved_channels_.find(key);
+            if (found == resolved_channels_.end() ||
+                found->second.original.playback_id != ch.playback_id ||
+                found->second.original.started_at_ms != ch.started_at_ms ||
+                found->second.original.file != ch.file || found->second.original.loop_file != ch.loop_file) {
+                ResolvedChannel resolved{ch, path_resolver_(ch.file), std::nullopt};
+                if (ch.loop_file) resolved.loop_file = path_resolver_(*ch.loop_file);
+                found = resolved_channels_.insert_or_assign(key, std::move(resolved)).first;
+            }
+            ch.file = found->second.file;
+            ch.loop_file = found->second.loop_file;
+        };
+        if (snapshot.bgm_channel) resolve(*snapshot.bgm_channel);
+        for (auto& [id, ch] : snapshot.se_channels) resolve(ch);
+        for (auto& [id, ch] : snapshot.voice_channels) resolve(ch);
+        if (realtime_) realtime_->submit(std::move(snapshot));
+        else {
+            AudioEngine resolved;
+            resolved.state() = std::move(snapshot);
+            update_sync(delta_ms, resolved, on_finish);
+        }
+        return;
+    }
+    update_sync(delta_ms, engine, on_finish);
+}
+
+void MediaPlayers::update_sync(uint64_t delta_ms, AudioEngine& engine, const FinishFn& on_finish) {
     // Output frames for this tick (44100 Hz clock).
     out_frame_frac_ += double(delta_ms) * double(kOutputRate) / 1000.0;
     size_t n = size_t(out_frame_frac_);
@@ -1637,6 +1763,7 @@ void MediaPlayers::update(uint64_t delta_ms, AudioEngine& engine, const FinishFn
             it == players_.end() || it->second->file != e.ch->file ||
             it->second->loop_play != e.ch->loop_play || it->second->loop_file != e.ch->loop_file ||
             it->second->started_at_ms != e.ch->started_at_ms ||
+            it->second->playback_id != e.ch->playback_id ||
             it->second->category != e.cat || it->second->id != e.id;
         if (!need_new) continue;
         auto p = std::make_unique<Player>();
@@ -1646,6 +1773,7 @@ void MediaPlayers::update(uint64_t delta_ms, AudioEngine& engine, const FinishFn
         p->loop_play = e.ch->loop_play;
         p->loop_file = e.ch->loop_file;
         p->started_at_ms = e.ch->started_at_ms;
+        p->playback_id = e.ch->playback_id;
         if (loader_) {
             if (auto bytes = loader_(e.ch->file)) {
                 auto src = VorbisSource::open(std::move(*bytes));

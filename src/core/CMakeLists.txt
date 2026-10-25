@@ -25,6 +25,7 @@ set(OA_CORE_SRC
   emote/emote_player.cpp
   emote/bc7decomp.cpp
   media/audio.cpp
+  media/audio_realtime.cpp
   media/decode_pool.cpp
   media/image.cpp
   media/video.cpp

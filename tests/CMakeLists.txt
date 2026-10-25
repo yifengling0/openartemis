@@ -28,6 +28,10 @@ add_executable(audio_window_test audio_window_test.cpp)
 target_link_libraries(audio_window_test PRIVATE libopenartemis Vorbis::vorbisenc)
 add_test(NAME audio_window COMMAND audio_window_test)
 
+add_executable(audio_realtime_test audio_realtime_test.cpp)
+target_link_libraries(audio_realtime_test PRIVATE libopenartemis Vorbis::vorbisenc)
+add_test(NAME audio_realtime COMMAND audio_realtime_test)
+
 add_executable(lua_smoke_test lua_smoke_test.cpp)
 target_link_libraries(lua_smoke_test PRIVATE libopenartemis lua51)
 add_test(NAME lua_smoke_test COMMAND lua_smoke_test)
