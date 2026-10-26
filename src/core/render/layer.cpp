@@ -397,10 +397,12 @@ SceneNode* Compositor::make_node(SceneNode* parent, const std::string& id) {
     nodes_.emplace(id, std::move(node)); // 所有权+索引；map 元素地址稳定
     std::vector<SceneNode*>& sib = parent ? parent->children : roots_;
     sib.insert(sorted_slot(sib, id), raw);
+    touch_render_revision(id);
     return raw;
 }
 
 void Compositor::detach_node(SceneNode* n) {
+    touch_render_revision(n->layer.id); // before unlinking its ancestors
     std::vector<SceneNode*>& sib = n->parent ? n->parent->children : roots_;
     sib.erase(std::remove(sib.begin(), sib.end(), n), sib.end());
     n->parent = nullptr; // 节点即将随 nodes_.erase 释放
@@ -440,6 +442,17 @@ void Compositor::ensure_path(const std::string& id) {
         if (dot == std::string::npos) break;
         i = dot + 1;
     }
+}
+
+void Compositor::touch_render_revision(const std::string& id) const {
+    const uint64_t revision = ++next_render_revision_;
+    if (id.empty() || id == "*") {
+        for (const auto& [key, node] : nodes_) node->render_revision = revision;
+        return;
+    }
+    const SceneNode* node = find_node(id);
+    for (auto* n = const_cast<SceneNode*>(node); n; n = n->parent)
+        n->render_revision = revision;
 }
 
 void Compositor::clear_scene() {

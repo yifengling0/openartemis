@@ -314,6 +314,8 @@ public:
     // the offscreen architecture, so stage pixels are unchanged).
     void render_beigin();
     void render_clear_tex_cache();
+    // Re-resolve clipping anchors on active frames; unchanged groups survive.
+    void render_clear_frame_cache() { anchor_frame_cache_.clear(); }
     size_t draw_one(const oa::render::Layer& l, const oa::render::Affine2& t,
         double op);
     std::optional<std::array<double, 3>> color_multiply_rgb(const std::string& v);
@@ -534,13 +536,26 @@ private:
     size_t trans_events = 0;
     // cached intermediate-group composite textures (baked WITHOUT the
     // group alpha — applied via alpha-mod at draw time so alpha tweens are
-    // cheap); invalidated whenever any scene mutation / animation ran.
-    std::map<std::string, TextureRef> group_tex_cache;
-    /// Flavour of each cached group texture: true = premultiplied TARGET
-    /// (identity plan, no readback), false = straight-RGBA uploaded bake.
-    /// A plan that changes flavour without invalidating the cache forces a
-    /// re-bake (the two must never be composited with the other's blend).
-    std::map<std::string, bool> group_tex_premul_;
+    // cheap). Subtree revisions and inherited draw state validate reuse.
+    struct GroupBake {
+        TextureRef texture = nullptr;
+        bool premul = false;
+        uint64_t revision = 0;
+        // Nested crop anchors may depend on nodes outside this subtree.
+        uint64_t anchor_revision = 0;
+        Affine2 world;
+        double parent_op = 1.0;
+        std::optional<IRect> clip;
+    };
+    std::map<std::string, GroupBake> group_tex_cache;
+    // Only unused render targets are retained; static CPU bakes stay separate.
+    // The pool is bounded by both count and bytes on large mobile stages.
+    struct GroupTarget { TextureRef texture; int w, h; };
+    std::vector<GroupTarget> group_target_pool_;
+    uint64_t group_target_pool_bytes_ = 0;
+    TextureRef acquire_group_target();
+    void recycle_group_target(TextureRef texture);
+    void release_group_bake(const GroupBake& bake);
     /// Profiler counters: group composites that skipped the readback vs
     /// those that still paid it (identity vs filtered/masked plans).
     uint64_t group_premul_bakes_ = 0;

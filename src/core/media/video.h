@@ -166,12 +166,11 @@ public:
     float movie_volume() const { return movie_volume_.load(std::memory_order_relaxed); }
 
     /// Attach the decode pool (optional). When present, every real decode
-    /// channel runs on one pool worker: the worker decodes the SAME
-    /// deterministic frame sequence (including loop restarts) into a
-    /// double-buffered pipe one frame ahead of the caller; the caller
-    /// copies the frame its virtual clock asks for and falls back to its
-    /// own synchronous decoder whenever the worker lags or is unavailable.
-    /// Null = plain synchronous decode (headless/tests stay byte-identical).
+    /// channel runs on one pool worker. Main picture and mask are decoded
+    /// and composited together, outside the engine mutex, into a bounded
+    /// two-frame pipe. Playback takes ready frames without waiting; a late
+    /// worker keeps the previous picture until the next driver iteration.
+    /// No available worker = synchronous decode (headless stays deterministic).
     void set_decode_pool(DecodePool* pool) { pool_ = pool; }
 
     // -- fullscreen -----------------------------------------------------------
@@ -268,13 +267,11 @@ private:
         int height = 0;
         std::vector<uint8_t> rgba;
         uint64_t revision = 0;
-        uint64_t main_seq = 0; // frames the sync decoder pulled (incl. 0)
 
         // Mask partner of a masked channel: the `<stem>_m`
-        // video's own decoder, stepped exactly one frame per DELIVERED main
-        // frame (index lock, caller thread) so the pair stays phase-locked
-        // regardless of the delivery path (pipe worker / sync decoder) and
-        // of loop restarts on equal-length files. Defined out-of-line in
+        // video's own decoder, stepped once per main frame so the pair
+        // stays phase-locked across both synchronous and worker playback,
+        // including loop restarts. Defined out-of-line in
         // video.cpp (unique_ptr keeps the incomplete type out of this TU).
         struct MaskPartner;
         std::unique_ptr<MaskPartner> mask;
@@ -298,11 +295,13 @@ private:
         struct Pipe {
             std::mutex mu;
             std::condition_variable cv;
-            std::vector<uint8_t> buf[2]; // double buffer, one frame lookahead
-            int w = 0;
-            int h = 0;
-            uint64_t produced = 0; // last worker-decoded frame sequence (1-based)
-            uint64_t consumed = 1; // frames already delivered (frame 0 exists)
+            struct Frame {
+                std::vector<uint8_t> rgba;
+                int w = 0;
+                int h = 0;
+            } frames[2]; // bounded lookahead, exchanged rather than copied
+            uint64_t produced = 1; // same revision domain as video_frame
+            uint64_t consumed = 1; // frame 0 (revision 1) already delivered
             bool eof = false;      // worker gave up (non-loop end / restart fail)
             bool cancel = false;
         };
@@ -321,9 +320,9 @@ private:
     /// channel byte-identical to the unmasked pipeline.
     bool attach_mask(VideoChannel& channel, DecodeState& ds);
     /// Advance the mask partner by one frame (index lock with the frame the
-    /// caller just delivered) and bake the composite alpha into the current
-    /// main frame. No-op for unmasked channels.
-    void step_mask(const VideoChannel& channel, DecodeState& ds);
+    /// decoder just produced) and bake the composite alpha into the current
+    /// main frame. No-op for unmasked channels; does not access engine state.
+    static void step_mask(const VideoChannel& channel, DecodeState& ds);
     /// Advance one channel's decode by the wall position (finish events go
     /// through finish_queue_).
     void pump_channel(VideoChannel& channel, DecodeState& ds);
@@ -332,13 +331,12 @@ private:
     /// hook, updates the channel audio counters).
     void pump_channel_audio(VideoChannel& channel, DecodeState& ds,
                             uint64_t delta_ms);
-    /// Retire a channel's pipe worker (sync decode takes over).
+    /// Cancel a channel's worker without joining it under the engine mutex.
     void cancel_pipe(DecodeState& ds);
-    /// Spawn the decode-pool pipe worker for a fresh decode state.
-    /// `bytes` is the already-loaded main file (the worker must not call
-    /// loader_ / PhysicsFS — that API is not thread-safe).
-    void start_pipe(DecodeState& ds, bool loop_play,
-                    std::shared_ptr<const std::vector<uint8_t>> bytes);
+    /// Transfer the already-open main/mask decoders to a pool worker.
+    /// On submission failure they remain available for synchronous playback.
+    /// Workers never call loader_ / PhysicsFS or reference the engine object.
+    void start_pipe(DecodeState& ds, const VideoChannel& channel);
     /// deterministic movie-stream flush. The movie stream is
     /// shared by every audio-bearing video channel (the audio-bearing split), so
     /// the flush only runs when no OTHER playing channel still feeds it

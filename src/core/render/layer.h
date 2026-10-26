@@ -291,6 +291,8 @@ struct SceneNode {
     /// 引擎消息槽标记 —— layered=0 独立消息的槽节点(位于消息槽区
     /// message_slots,不在场景 roots 树;渲染/顺序输出恒在场景区之后)。
     bool message_slot = false;
+    // Changes to this node or any descendant, including live host frames.
+    uint64_t render_revision = 0;
 };
 
 /// [lytween] 完成回执：tween 完成处理器的公开**名字**（定义 = render 内部面
@@ -396,6 +398,7 @@ public:
     /// 统一 invalidate 入口:记录一次 (id, aspect) 写。伪 id:"" = 根 props
     /// holder(!,Layer-shaped,非节点),"*" = 全场景结构操作(clear_scene)。
     void mark_dirty(const std::string& id, DirtyAspect aspect) const;
+    uint64_t render_revision() const { return next_render_revision_; }
     /// 自上次 consume 以来的脏报告(id → 方面位掩码;同帧去重后的集合)。
     const std::map<std::string, uint16_t>& dirty_report() const {
         return dirty_frame_;
@@ -692,12 +695,16 @@ private:
     // 每帧 consume_dirty_report() 取走;消费者缺失时按上限丢弃并计数。
     // mutable:簿记是观察通道(不改语义态),宿主渲染
     // 路径仅持 const scene 句柄。
+    void touch_render_revision(const std::string& id) const;
+    mutable uint64_t next_render_revision_ = 0;
     mutable std::map<std::string, uint16_t> dirty_frame_;
     static constexpr size_t kDirtyLedgerCap = 4096;
     mutable size_t dirty_ledger_dropped_ = 0;
 };
 
 inline void Compositor::mark_dirty(const std::string& id, DirtyAspect aspect) const {
+    if (uint16_t(aspect) & ~uint16_t(DirtyAspect::Handlers))
+        touch_render_revision(id);
     // 有界簿记:宿主每帧消费(容量远够一帧写);无消费者的核心测试进程按上限
     // 丢弃并计数,防无限增长(丢弃只损失簿记证据,不影响任何行为)。
     if (dirty_frame_.size() >= kDirtyLedgerCap) {
@@ -721,7 +728,10 @@ inline void Compositor::note_content_change(const std::string& id,
     // 簿记输出与收口前逐位一致(OA_DIRTY_AB 汇总同口径)。aspects == None =
     // 活动帧写(advance_tweens 值写/anime 帧写):簿记不记 —— 由
     // animated_now/prev 帧项覆盖,若记会与 legacy 失配(A/B 类差异)。
-    if (aspects == DirtyAspect::None) return;
+    if (aspects == DirtyAspect::None) {
+        touch_render_revision(id);
+        return;
+    }
     mark_dirty(id, aspects);
 }
 

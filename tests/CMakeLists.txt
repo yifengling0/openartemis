@@ -223,3 +223,9 @@ set_tests_properties(emote_gpu PROPERTIES SKIP_RETURN_CODE 77)
 
 # Real-game-asset tests (see docs/TESTING.md for asset environment variables).
 add_subdirectory(fpm)
+
+add_executable(group_cache_test group_cache_test.cpp)
+target_link_libraries(group_cache_test PRIVATE libopenartemis)
+add_test(NAME group_cache_gles COMMAND group_cache_test gles)
+add_test(NAME group_cache_sdl COMMAND group_cache_test sdl)
+set_tests_properties(group_cache_gles group_cache_sdl PROPERTIES SKIP_RETURN_CODE 77)

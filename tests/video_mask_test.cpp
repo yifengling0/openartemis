@@ -19,6 +19,7 @@
 //   => composited frame: opaque white core (main & mask overlap), white RGB
 //      with ~zero alpha in the ring band (main only), black canvas keyed to
 //      alpha 0.
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdint>
@@ -349,10 +350,8 @@ int main() {
             }
             // A third lap boundary must land phase 0 again with the exact
             // phase-0 core bbox (mask restarted with the main).
-            for (int tick = 0; tick < 2; ++tick) {
-                v.update(40);
-                v.poll_finish_events();
-            }
+            v.update(41); // total 201ms: third lap begins at authored 200ms
+            v.poll_finish_events();
             px = frame_px(v, "mv", &rev);
             check(px && rev == 7, "3: third lap frame 0");
             if (px) {
@@ -365,62 +364,92 @@ int main() {
         }
 
         // ------------------------------------------------------------------
-        // 4. decode-pool pipe path: the worker decodes the main ahead (and
-        //    restarts its loop silently); the caller still steps the mask
-        //    one frame per delivered frame. Real-time smoke: sample over
-        //    several loop periods and check the alignment invariant — the
-        //    visible core must sit exactly at main-white inset by 3 (mask
-        //    offset), i.e. mask phase == main phase at every sample.
+        // 4. Compare every worker-delivered frame with synchronous decoding,
+        // including revision 2, loop wraps, short-mask EOF and replay. Stop
+        // the wall-clock driver so scheduling cannot skip a test observation.
         // ------------------------------------------------------------------
-        {
-            AssetHost host;
-            build_pair(host, "loop.ogv", "loop_m.ogv");
-            oa::media::DecodePool pool(1);
-            oa::media::VideoEngine v;
-            v.set_loader(host);
-            v.set_decode_pool(&pool);
-            oa::media::VideoConfig cfg;
-            cfg.file = "loop.ogv";
-            cfg.loop_play = true;
-            v.play_layer("mv", cfg);
-            check(v.state().video_layers.at("mv").mask_on,
-                  "4: pipe path detects the mask partner");
-            for (int i = 0; i < 100 && !v.driver_active(); ++i)
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            check(v.driver_active(), "4: driver running (pool present)");
-            bool saw_ok = false;
-            bool bad = false;
-            int samples = 0;
-            int last_rev = 0;
-            for (int i = 0; i < 60 && !bad; ++i) { // ~6 s of loop at most
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                int rev = 0;
-                const uint8_t* px = frame_px(v, "mv", &rev);
-                if (!px) continue;
-                if (rev > last_rev) {
-                    last_rev = rev;
-                    const Stats s = stats_of(px, kW, kH);
-                    if (s.core_l >= 0 && s.white_l >= 0) {
-                        ++samples;
-                        const int off_l = s.core_l - s.white_l;
-                        const int off_t = s.core_t - s.white_t;
-                        if (off_l < 2 || off_l > 4 || off_t < 2 || off_t > 4) {
-                            bad = true;
-                            std::fprintf(stderr,
-                                         "FAIL: 4: mask/main phase drift: core "
-                                         "offset (%d,%d) (sample rev=%d)\n",
-                                         off_l, off_t, rev);
-                        }
-                        if (s.canvas_alpha_max <= 20 && s.ring_white >= 4) saw_ok = true;
-                    }
+        for (bool loop : {false, true}) {
+            for (bool short_mask : {false, true}) {
+                AssetHost host;
+                build_pair(host, "loop.ogv", "loop_m.ogv");
+                if (short_mask) {
+                    auto all = white_block_frames(6, 3, 2);
+                    std::vector<std::vector<uint8_t>> frames;
+                    for (int i = 0; i < 2; ++i)
+                        frames.emplace_back(all.begin() + i*kW*kH*4,
+                                            all.begin() + (i+1)*kW*kH*4);
+                    host.assets["loop_m.ogv"] = oafix::encode_theora_ogv(kW,kH,frames);
                 }
-                if (last_rev >= 12) break; // >= 3 full laps through the pipe
+                oa::media::DecodePool pool(1);
+                oa::media::VideoEngine sync, async;
+                sync.set_loader(host); async.set_loader(host);
+                async.set_decode_pool(&pool);
+                oa::media::VideoConfig cfg;
+                cfg.file = "loop.ogv"; cfg.loop_play = loop;
+                auto play = [&] {
+                    sync.play_layer("mv", cfg); async.play_layer("mv", cfg);
+                    async.stop_driver();
+                };
+                play();
+                for (int lap = 0; lap < 2; ++lap) {
+                    const int count = loop ? 15 : 3;
+                    for (int frame = 0; frame < count; ++frame) {
+                        const uint64_t target_ms = (uint64_t(frame)*1000+29)/30+1;
+                        auto advance = [&](oa::media::VideoEngine& v) {
+                            const auto now = v.state().video_layers.at("mv").position_ms;
+                            v.update(target_ms > now ? target_ms-now : 0);
+                        };
+                        advance(sync); advance(async);
+                        const auto deadline = std::chrono::steady_clock::now() +
+                                              std::chrono::seconds(2);
+                        while (async.frame_revision("mv") < uint64_t(frame+1) &&
+                               std::chrono::steady_clock::now() < deadline) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                            async.update(0);
+                        }
+                        int sr=0, ar=0;
+                        const uint8_t* sp=frame_px(sync,"mv",&sr);
+                        const uint8_t* ap=frame_px(async,"mv",&ar);
+                        if(sr!=frame+1 || ar!=sr) std::fprintf(stderr,"sequence loop=%d short=%d lap=%d frame=%d sync=%d async=%d pos=%llu\n",loop,short_mask,lap,frame,sr,ar,(unsigned long long)async.state().video_layers.at("mv").position_ms);
+                        check(sr==frame+1 && ar==sr,"4: every revision delivered in order");
+                        check(sp && ap && std::equal(sp,sp+kW*kH*4,ap),
+                              "4: worker main/mask pixels equal synchronous frame");
+                    }
+                    if (!loop) {
+                        sync.update(40); async.update(40);
+                        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+                        while (async.is_layer_playing("mv") &&
+                               std::chrono::steady_clock::now()<deadline) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                            async.update(0);
+                        }
+                        check(!async.is_layer_playing("mv"),"4: worker reaches EOF");
+                        const auto ev=async.poll_finish_events();
+                        check(ev.size()==1 && ev[0].id=="mv","4: exactly one EOF finish");
+                        async.update(100);check(async.poll_finish_events().empty(),
+                                               "4: EOF finish is not repeated");
+                    }
+                    sync.stop_all_videos(); async.stop_all_videos();
+                    if (lap==0) play(); // same id; old worker may still be retiring
+                }
+                pool.stop();
             }
-            check(!bad, "4: mask/main stay phase-locked through the pipe path");
-            check(last_rev >= 8, "4: pipe delivered past two loop wraps");
-            check(saw_ok, "4: composite signatures seen in pipe-delivered frames");
-            v.stop_all_videos();
-            pool.stop();
+        }
+        // All pool slots occupied: keep the synchronous path usable.
+        {
+            AssetHost host; build_pair(host,"loop.ogv","loop_m.ogv");
+            oa::media::DecodePool pool(1);
+            oa::media::VideoEngine busy, fallback;
+            busy.set_loader(host); fallback.set_loader(host);
+            busy.set_decode_pool(&pool); fallback.set_decode_pool(&pool);
+            oa::media::VideoConfig cfg; cfg.file="loop.ogv"; cfg.loop_play=true;
+            busy.play_layer("busy",cfg); busy.stop_driver();
+            fallback.play_layer("mv",cfg); fallback.stop_driver();
+            fallback.update(34);
+            check(fallback.frame_revision("mv")==2,"4: saturated pool decodes synchronously");
+            int rev=0;const auto* px=frame_px(fallback,"mv",&rev);
+            if(px)expect_phase_stats("fallback",stats_of(px,kW,kH),1);
+            busy.stop_all_videos();fallback.stop_all_videos();pool.stop();
         }
 
         // ------------------------------------------------------------------

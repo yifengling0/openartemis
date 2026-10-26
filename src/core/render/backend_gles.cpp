@@ -1343,6 +1343,11 @@ TextureRef GlesRenderBackend::create_texture(int w, int h,
                                              TextureAccess access)
 {
     if (!gl_context_ || w <= 0 || h <= 0 || w > 8192 || h > 8192) return nullptr;
+    // Target creation temporarily binds a new FBO. Pending primitives still
+    // belong to the current target; flush them before changing GL state and
+    // restore that target on both success and failure (including nested bakes).
+    if (access == TextureAccess::Target) flush_batch();
+    const GLuint_ saved_fbo = cur_target_ ? cur_target_->fbo : 0;
     GlesTexture* gt = new GlesTexture();
     gt->w = w;
     gt->h = h;
@@ -1369,14 +1374,14 @@ TextureRef GlesRenderBackend::create_texture(int w, int h,
             GL_FRAMEBUFFER_COMPLETE_) {
             fail("gles: framebuffer incomplete (%dx%d %s)", w, h,
                  access == TextureAccess::Target ? "target" : "");
-            glBindFramebuffer(GL_FRAMEBUFFER_, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER_, saved_fbo);
             glDeleteFramebuffers(1, &gt->fbo);
             glDeleteTextures(1, &gt->tex);
             gl_bound_tex_ = 0;
             delete gt;
             return nullptr;
         }
-        glBindFramebuffer(GL_FRAMEBUFFER_, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER_, saved_fbo);
     }
     return gt;
 }

@@ -266,10 +266,13 @@ void RenderEngine::release_all()
     for (auto& [k, t] : solid_tex_cache)
         if (t) backend_->destroy_texture(t);
     solid_tex_cache.clear();
-    for (auto& [k, t] : group_tex_cache)
-        if (t) backend_->destroy_texture(t);
+    for (auto& [k, bake] : group_tex_cache)
+        if (bake.texture) backend_->destroy_texture(bake.texture);
     group_tex_cache.clear();
-    group_tex_premul_.clear();
+    for (auto& target : group_target_pool_)
+        backend_->destroy_texture(target.texture);
+    group_target_pool_.clear();
+    group_target_pool_bytes_ = 0;
     emote_canvas_.clear();
     emote_atlases_.clear();
     textures.clear();
@@ -767,29 +770,46 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
     const bool had_clip = backend_->clip_enabled();
     IRect old_clip{};
     if (had_clip) old_clip = backend_->clip_rect();
-    const auto cmit = group_tex_cache.find(layer.id);
-    if (cmit != group_tex_cache.end() && cmit->second) {
-        // The bake already contains the subtree glyphs — but only when its
-        // flavour matches this plan. An identity plan caches a premultiplied
-        // TARGET (no readback), a filtered/masked plan caches straight RGBA;
-        // compositing one with the other's blend would be wrong, so a
-        // flavour change drops the cache entry and re-bakes below.
-        const bool want_premul = group_plan_is_identity_composite(p);
-        const auto fmit = group_tex_premul_.find(layer.id);
-        const bool have_premul = fmit != group_tex_premul_.end() && fmit->second;
-        if (have_premul == want_premul) {
+    const bool want_premul = group_plan_is_identity_composite(p);
+    auto cmit = group_tex_cache.find(layer.id);
+    if (cmit != group_tex_cache.end()) {
+        const GroupBake& bake = cmit->second;
+        const auto& m = bake.world;
+        const auto same_clip = [](const std::optional<IRect>& a,
+                                  const std::optional<IRect>& b) {
+            return a.has_value() == b.has_value() &&
+                   (!a || (a->x == b->x && a->y == b->y &&
+                           a->w == b->w && a->h == b->h));
+        };
+        float w = 0, h = 0;
+        if (bake.texture && bake.premul == want_premul &&
+            bake.revision == node.render_revision &&
+            (!bake.anchor_revision || bake.anchor_revision == sc.render_revision()) &&
+            m.a == world.a && m.b == world.b && m.c == world.c &&
+            m.d == world.d && m.e == world.e && m.f == world.f &&
+            bake.parent_op == parent_op && same_clip(bake.clip, p.clip) &&
+            backend_->texture_size(bake.texture, &w, &h) &&
+            w == stage_w_ && h == stage_h_) {
             if (want_premul)
-                composite_group_bake_premul(cmit->second, p, had_clip, old_clip);
+                composite_group_bake_premul(bake.texture, p, had_clip, old_clip);
             else
-                composite_group_bake(cmit->second, p, had_clip, old_clip);
+                composite_group_bake(bake.texture, p, had_clip, old_clip);
             return;
         }
-        backend_->destroy_texture(cmit->second);
+        release_group_bake(bake);
         group_tex_cache.erase(cmit);
-        group_tex_premul_.erase(layer.id);
     }
-    TextureRef group_tex = backend_->create_texture(stage_w_, stage_h_,
-                                                    TextureAccess::Target);
+    // A nested file-less crop can be anchored to a backdrop outside this
+    // subtree. Until those external dependencies are tracked individually,
+    // retain conservative invalidation for such groups on any scene write.
+    const auto has_anchor_crop = [&](const auto& self, const SceneNode& n) -> bool {
+        if (n.layer.file.empty() && layer_prop(n.layer, "clip")) return true;
+        for (const auto* child : n.children) if (self(self, *child)) return true;
+        return false;
+    };
+    const uint64_t anchor_revision = has_anchor_crop(has_anchor_crop, node)
+                                       ? sc.render_revision() : 0;
+    TextureRef group_tex = acquire_group_target();
     if (!group_tex) {
         // no offscreen possible: naive fallback (children with the group
         // alpha multiplied; only reachable when the backend cannot make
@@ -816,10 +836,8 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
     // below — and skips a full-screen glReadPixels and an ~stage-sized upload.
     if (group_plan_is_identity_composite(p)) {
         end_offscreen_pass(saved_target, had_clip, old_clip);
-        TextureRef prev = group_tex_cache[layer.id];
-        if (prev && prev != group_tex) backend_->destroy_texture(prev);
-        group_tex_cache[layer.id] = group_tex; // owns it until invalidation
-        group_tex_premul_[layer.id] = true;
+        group_tex_cache[layer.id] = {group_tex, true, node.render_revision, anchor_revision,
+                                     world, parent_op, p.clip};
         composite_group_bake_premul(group_tex, p, had_clip, old_clip);
         ++group_premul_bakes_;
         return;
@@ -841,11 +859,11 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
     // upload the baked texture into the cache and blend once
     TextureRef baked = upload_baked_texture(out_px, stage_w_, stage_h_);
     if (baked) {
-        group_tex_cache[layer.id] = baked; // owns it until invalidation
-        group_tex_premul_[layer.id] = false;
+        group_tex_cache[layer.id] = {baked, false, node.render_revision, anchor_revision,
+                                     world, parent_op, p.clip};
         composite_group_bake(baked, p, had_clip, old_clip);
     }
-    backend_->destroy_texture(group_tex);
+    recycle_group_target(group_tex);
 }
 
 void RenderEngine::draw_node(const oa::render::Compositor& sc,
@@ -1506,17 +1524,51 @@ void RenderEngine::evict_asset_textures()
         (void)last;
     }
 }
-void RenderEngine::render_clear_tex_cache()
-{
+TextureRef RenderEngine::acquire_group_target() {
+    while (!group_target_pool_.empty()) {
+        const GroupTarget target = group_target_pool_.back();
+        group_target_pool_.pop_back();
+        const TextureRef texture = target.texture;
+        group_target_pool_bytes_ -= uint64_t(target.w) * target.h * 4;
+        if (target.w != stage_w_ || target.h != stage_h_) {
+            backend_->destroy_texture(texture);
+            continue;
+        }
+        // begin_offscreen_pass resets blend, alpha, contents and clip.
+        backend_->set_texture_alpha_mod(texture, 255);
+        backend_->set_texture_color_mod(texture, 255, 255, 255);
+        return texture;
+    }
+    return backend_->create_texture(stage_w_, stage_h_, TextureAccess::Target);
+}
+
+void RenderEngine::recycle_group_target(TextureRef texture) {
+    if (!texture) return;
+    float w = 0, h = 0;
+    constexpr uint64_t budget = 32ull * 1024 * 1024;
+    if (texture != backend_->current_target() &&
+        backend_->texture_size(texture, &w, &h) && w > 0 && h > 0) {
+        const uint64_t bytes = uint64_t(w) * uint64_t(h) * 4;
+        if (group_target_pool_.size() < 4 &&
+            bytes <= budget - group_target_pool_bytes_) {
+            group_target_pool_.push_back({texture, int(w), int(h)});
+            group_target_pool_bytes_ += bytes;
+            return;
+        }
+    }
+    backend_->destroy_texture(texture);
+}
+
+void RenderEngine::release_group_bake(const GroupBake& bake) {
+    if (bake.premul) recycle_group_target(bake.texture);
+    else if (bake.texture) backend_->destroy_texture(bake.texture);
+}
+
+void RenderEngine::render_clear_tex_cache() {
     if (!backend_) return;
-    for (auto& [k, t] : group_tex_cache)
-        if (t) backend_->destroy_texture(t);
+    for (const auto& [id, bake] : group_tex_cache) release_group_bake(bake);
     group_tex_cache.clear();
-    group_tex_premul_.clear();
-    // anchor-frame bounds are scene-dependent — they must
-    // re-resolve whenever group bakes are invalidated (scene/text/anime/
-    // fade/video changed).
-    anchor_frame_cache_.clear();
+    render_clear_frame_cache();
 }
 size_t RenderEngine::draw_one(const oa::render::Layer& l, const oa::render::Affine2& t,
     double op) {

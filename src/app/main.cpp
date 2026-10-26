@@ -2622,13 +2622,15 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // offscreen group bakes too — glyphs now render inside their node's
     // subtree, so a bake that contains text must be rebuilt when the text
     // changed without any scene mutation.
-    // Active video also invalidates group bakes: a video layer inside a
-    // baked group refreshes its texture every frame and would otherwise
-    // keep drawing the stale bake. An animated emote canvas is the same
-    // kind of live host texture.
-    if (scene_mutated || animated_now || s_prev_animated || text_changed ||
-        fade_active || video_active || emote_active) {
+    // Live textures and tween writes update per-subtree render revisions.
+    // Text and script events retain full invalidation; active frames also
+    // re-resolve anchor bounds, which can depend on another scene branch.
+    if (scene_mutated || text_changed || fade_active) {
         state->oaRender->render_clear_tex_cache();
+    } else if (animated_now || s_prev_animated || video_active || emote_active) {
+        // Each group validates its subtree revision and inherited transform,
+        // opacity and clip. Unrelated animation must not re-bake static groups.
+        state->oaRender->render_clear_frame_cache();
     }
 
     // ---- render (static-frame skip: identical frames keep the last

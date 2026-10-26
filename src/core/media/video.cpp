@@ -119,68 +119,75 @@ void VideoEngine::cancel_pipe(DecodeState& ds) {
     ds.pipe.reset();
 }
 
-/// Spawn one pool worker that decodes `bytes` from frame 1 onward into the
-/// double-buffered pipe (frame 0 is decoded synchronously at start_decode).
-/// The worker restarts loops exactly like the synchronous pump does, so the
-/// delivered frame sequence is deterministic and identical to decoding on
-/// the caller's thread. Bytes are passed in (not re-fetched through
-/// loader_/PhysicsFS) because PhysicsFS is not thread-safe.
-void VideoEngine::start_pipe(DecodeState& ds, bool loop_play,
-                             std::shared_ptr<const std::vector<uint8_t>> bytes) {
-    if (!pool_ || pool_->threads() <= 0 || !bytes || bytes->empty()) return;
+// Frame 0 is already published. Move the live decoders, including the mask
+// at the same sequence position, to the worker. It owns them until cancel/EOF;
+// stop/replay can erase DecodeState without racing a decoder or joining a job.
+void VideoEngine::start_pipe(DecodeState& ds, const VideoChannel& channel) {
+    if (!pool_ || pool_->threads() <= 0 || !ds.source) return;
     auto pf = std::make_shared<DecodeState::Pipe>();
-    pf->consumed = 1; // frame 0 already delivered by start_decode
-    const bool ok = pool_->submit_long([pf, bytes, loop_play] {
-        std::unique_ptr<VideoSource> src = open_any_source(*bytes);
-        auto give_up = [&] {
+    auto worker = std::make_shared<DecodeState>();
+    worker->source = std::move(ds.source);
+    worker->mask = std::move(ds.mask);
+    worker->width = ds.width;
+    worker->height = ds.height;
+    VideoChannel config;
+    config.id = channel.id;
+    config.loop_play = channel.loop_play;
+    const bool ok = pool_->submit_long([pf, worker, config] {
+        const auto finish = [&] {
             std::lock_guard<std::mutex> lk(pf->mu);
             pf->eof = true;
             pf->cv.notify_all();
         };
-        if (!src) {
-            give_up();
-            return;
-        }
-        // Frame 0 is already current on the caller; skip it so seq 1 is
-        // the second picture (a fresh decoder would otherwise re-deliver 0).
-        if (!src->read_frame()) {
-            give_up();
-            return;
-        }
-        for (uint64_t seq = 1;; ++seq) {
-            // One-frame lookahead: only write slot seq%2 once frame seq-2
-            // has been delivered.
-            {
-                std::unique_lock<std::mutex> lk(pf->mu);
-                pf->cv.wait(lk, [&] { return pf->cancel || pf->consumed + 1 >= seq; });
-                if (pf->cancel) return;
-            }
-            if (!src->read_frame()) {
-                // EOF: mirror the sync pump's restart rule.
-                if (loop_play && src->seek_zero() && src->read_frame()) {
-                    // restarted: fall through and deliver this frame as seq
-                } else {
-                    give_up();
+        try {
+            // Revision 1 is frame 0. In particular, revision 2 must deliver
+            // frame 1, including its matching mask (never skip a first frame).
+            for (uint64_t revision = 2;; ++revision) {
+                {
+                    std::unique_lock<std::mutex> lk(pf->mu);
+                    pf->cv.wait(lk, [&] {
+                        return pf->cancel || revision <= pf->consumed + 2;
+                    });
+                    if (pf->cancel) return;
+                }
+                VideoSource& src = *worker->source;
+                if (!src.read_frame() &&
+                    !(config.loop_play && src.seek_zero() && src.read_frame())) {
+                    finish();
                     return;
                 }
+                worker->width = src.width();
+                worker->height = src.height();
+                const size_t px = size_t(worker->width) * size_t(worker->height) * 4;
+                if (worker->width <= 0 || worker->height <= 0 ||
+                    px == 0 || src.rgba().size() < px) {
+                    finish();
+                    return;
+                }
+                worker->rgba = src.rgba();
+                step_mask(config, *worker);
+                // Publish a complete, phase-matched frame. The expensive
+                // decode/copy/alpha work above holds neither playback mutex.
+                std::lock_guard<std::mutex> lk(pf->mu);
+                if (pf->cancel) return;
+                auto& frame = pf->frames[revision % 2];
+                frame.rgba.swap(worker->rgba);
+                frame.w = worker->width;
+                frame.h = worker->height;
+                pf->produced = revision;
+                pf->cv.notify_all();
             }
-            const auto& rgba = src->rgba();
-            const size_t px = size_t(src->width()) * size_t(src->height()) * 4;
-            if (px == 0 || rgba.size() < px) {
-                give_up();
-                return;
-            }
-            std::lock_guard<std::mutex> lk(pf->mu);
-            const int slot = int(seq % 2);
-            if (pf->buf[slot].size() != px) pf->buf[slot].resize(px);
-            std::memcpy(pf->buf[slot].data(), rgba.data(), px);
-            pf->w = src->width();
-            pf->h = src->height();
-            pf->produced = seq;
-            pf->cv.notify_all();
+        } catch (...) {
+            finish(); // a failed job must not leave playback waiting forever
+            throw;
         }
     });
-    if (ok) ds.pipe = std::move(pf);
+    if (ok) {
+        ds.pipe = std::move(pf);
+    } else {
+        ds.source = std::move(worker->source);
+        ds.mask = std::move(worker->mask);
+    }
 }
 
 VideoEngine::~VideoEngine() {
@@ -359,7 +366,6 @@ bool VideoEngine::start_decode(VideoChannel& channel, DecodeState& ds) {
     ds.height = src->height();
     ds.rgba = src->rgba();
     ds.revision = 1;
-    ds.main_seq = 1; // frame 0 consumed by the sync decoder
     ds.source = std::move(src);
     channel.decoded = true;
 #if defined(OA_HAVE_FFMPEG) && OA_HAVE_FFMPEG
@@ -401,12 +407,9 @@ bool VideoEngine::start_decode(VideoChannel& channel, DecodeState& ds) {
         attach_mask(channel, ds);
     else if (std::getenv("OA_VIDEO_DEBUG"))
         std::fprintf(stderr, "[video] OA_NO_VIDEO_MASK: skip _m sibling\n");
-    // Optional decode-pool worker: decodes frame 1+ ahead (frame 0 is
-    // current). Falls back to the sync decoder on lag/cancel. The worker
-    // only ever decodes the MAIN stream; the mask partner is stepped by the
-    // caller (step_mask) one frame per delivered main frame, so both
-    // delivery paths stay phase-locked without touching the worker.
-    start_pipe(ds, channel.loop_play, bytes);
+    // The worker owns the already-open main/mask pair from frame 1 onward.
+    // A late worker never forces decode/alpha work back under engine_mutex_.
+    start_pipe(ds, channel);
     if (std::getenv("OA_VIDEO_DEBUG")) {
         std::fprintf(stderr, "[video] source attached '%s' %dx%d @%.2ffps\n",
                      channel.file.c_str(), ds.width, ds.height,
@@ -478,8 +481,8 @@ bool VideoEngine::attach_mask(VideoChannel& channel, DecodeState& ds) {
 // when the mask can no longer advance it freezes at its last frame instead
 // of popping the picture back to the unmasked look. Then the composite alpha
 // (main luma-key x mask gray) is baked into the current frame. Runs on the
-// caller thread right after every frame delivery site (pipe fast path, sync
-// pull, sync loop restart), never on the pipe worker.
+// decoder's thread: the worker before publishing a frame, or the synchronous
+// pump when no pool slot was available.
 void VideoEngine::step_mask(const VideoChannel& channel, DecodeState& ds) {
     DecodeState::MaskPartner* mp = ds.mask.get();
     if (!mp || !mp->src) return;
@@ -817,101 +820,50 @@ void VideoEngine::pump_channel_audio(VideoChannel& channel, DecodeState& ds,
 }
 
 void VideoEngine::pump_channel(VideoChannel& channel, DecodeState& ds) {
-    if (!channel.playing || !ds.source) return;
+    if (!channel.playing || (!ds.source && !ds.pipe)) return;
     // Decode frames whose presentation time has passed (frame 0 is already
     // current when the channel started).
     while (channel.playing && double(channel.position_ms) >= ds.next_frame_ms) {
         const uint64_t want = ds.revision + 1; // next frame sequence number
 
-        // --- decode-pool pipe fast path (worker decodes the same stream) ---
+        // Ready frames are swapped in under a short lock. Never wait for
+        // decode while holding engine_mutex_: callers of state/finish/frame
+        // must stay responsive even when a mobile CPU misses a video deadline.
         if (ds.pipe) {
             auto pf = ds.pipe;
             std::unique_lock<std::mutex> lk(pf->mu);
-            if (!pf->cancel) {
-                // The worker is normally one frame ahead; wait only a
-                // hairline for it, then fall back synchronously.
-                pf->cv.wait_for(lk, std::chrono::milliseconds(2),
-                                [&] { return pf->cancel || pf->eof || pf->produced >= want; });
-                if (pf->produced >= want) {
-                    const size_t px = size_t(pf->w) * size_t(pf->h) * 4;
-                    const int slot = int(want % 2);
-                    if (px == 0 || pf->buf[slot].size() < px) {
-                        lk.unlock();
-                        cancel_pipe(ds);
-                        channel.playing = false;
-                        queue_finish_locked(channel.id == kOverlayVideoId ? std::string()
-                                                                           : channel.id);
-                        return;
-                    }
-                    if (ds.rgba.size() != px) ds.rgba.resize(px);
-                    std::memcpy(ds.rgba.data(), pf->buf[slot].data(), px);
-                    ds.width = pf->w;
-                    ds.height = pf->h;
-                    ++ds.revision;
+            if (!pf->cancel && pf->produced >= want) {
+                auto& frame = pf->frames[want % 2];
+                const size_t px = size_t(frame.w) * size_t(frame.h) * 4;
+                if (frame.w > 0 && frame.h > 0 && px > 0 && frame.rgba.size() >= px) {
+                    ds.rgba.swap(frame.rgba);
+                    ds.width = frame.w;
+                    ds.height = frame.h;
+                    ds.revision = want;
                     pf->consumed = want;
                     pf->cv.notify_all();
-                    lk.unlock(); // mask step decodes; never under the pipe lock
-                    step_mask(channel, ds); // mask partner: one frame per delivered frame
+                    lk.unlock();
                     ds.next_frame_ms += ds.frame_interval_ms;
                     continue;
                 }
-                if (pf->eof) {
-                    // The worker reached the end (non-loop EOF or a loop
-                    // whose restart failed): natural finish, same as the
-                    // sync pump's give-up path.
-                    if (std::getenv("OA_VIDEO_DEBUG")) {
-                        std::fprintf(stderr,
-                                     "[video] channel '%s' pipe EOF after "
-                                     "%llu decoded frames (pos=%llums)\n",
-                                     channel.id.c_str(),
-                                     (unsigned long long)ds.revision,
-                                     (unsigned long long)channel.position_ms);
-                    }
-                    lk.unlock();
-                    cancel_pipe(ds); // retire; finish follows below
-                    channel.playing = false;
-                    queue_finish_locked(channel.id == kOverlayVideoId ? std::string()
-                                                                       : channel.id);
-                    return;
-                }
-            }
-            lk.unlock();
-            // Worker lagged / was cancelled: retire the pipe permanently and
-            // decode the wanted frame synchronously (same byte stream).
-            {
-                std::lock_guard<std::mutex> g(pf->mu);
                 pf->cancel = true;
-                pf->cv.notify_all();
             }
-            ds.pipe.reset();
-        }
-
-        // --- synchronous decode (authoritative; original semantics) -------
-        // The sync decoder restarts at stream zero whenever it runs: discard
-        // any frames the pipe already delivered before pulling the wanted
-        // sequence element.
-        while (ds.main_seq + 1 < want) {
-            if (!ds.source->read_frame()) {
-                // The sync decoder crossed EOF mid-discard (a pipe worker
-                // that already restarted a loop can run past the file):
-                // mirror the loop restart rule instead of giving up.
-                if (channel.loop_play && ds.source->seek_zero() &&
-                    ds.source->read_frame()) {
-                    ++ds.main_seq;
-                    continue;
-                }
+            if (pf->eof || pf->cancel) {
+                lk.unlock();
+                cancel_pipe(ds);
                 channel.playing = false;
                 queue_finish_locked(channel.id == kOverlayVideoId ? std::string()
                                                                    : channel.id);
-                return;
             }
-            ++ds.main_seq;
+            return; // keep the last complete frame while the worker catches up
         }
+
+        // No worker accepted this channel: advance the same decoder pair
+        // synchronously, preserving the authored cadence across loop wraps.
         if (ds.source->read_frame()) {
             ds.width = ds.source->width();
             ds.height = ds.source->height();
             ds.rgba = ds.source->rgba();
-            ++ds.main_seq;
             ++ds.revision;
             step_mask(channel, ds); // mask partner: one frame per delivered frame
             ds.next_frame_ms += ds.frame_interval_ms;
@@ -924,10 +876,9 @@ void VideoEngine::pump_channel(VideoChannel& channel, DecodeState& ds) {
             ds.width = ds.source->width();
             ds.height = ds.source->height();
             ds.rgba = ds.source->rgba();
-            ++ds.main_seq;
             ++ds.revision;
             step_mask(channel, ds); // mask restart rides the main's wrap
-            ds.next_frame_ms = double(channel.position_ms) + ds.frame_interval_ms;
+            ds.next_frame_ms += ds.frame_interval_ms;
             continue;
         }
         channel.playing = false;
