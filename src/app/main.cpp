@@ -2751,7 +2751,12 @@ SDL_AppResult SDL_AppIterate(void* appstate)
             // every status beat — the real-machine number for "is the sound
             // late right now", printable without waiting for AppQuit (the
             // OA_AUDIO_DIAG summary below stays the end-of-run census).
+#ifdef __OHOS__
+            // Device logs must expose audio starvation without an injected environment.
+            if (state->rt) {
+#else
             if (std::getenv("OA_AUDIO_DIAG") && state->rt) {
+#endif
                 auto& mp = state->rt->media_players();
                 const size_t mix = mp.audio_level_frames(0);
                 const size_t mov = mp.audio_level_frames(1);
@@ -2760,7 +2765,11 @@ SDL_AppResult SDL_AppIterate(void* appstate)
                 // sound started now would suffer; `under` counts the device
                 // callbacks that had to pad a live stream with silence (a hole
                 // in the middle of the sound = the click this revision fixes).
+#ifdef __OHOS__
+                SDL_Log("[audiolat] f=%llu mix=%zu (%.0fms) movie=%zu "
+#else
                 std::printf("[audiolat] f=%llu mix=%zu (%.0fms) movie=%zu "
+#endif
                             "(%.0fms) target=%zu paced_out=%llu refill=%llu "
                             "cb=%llu under_mix=%llu under_movie=%llu "
                             "source_short=%llu load_max_us=%llu streams=%zu\n",

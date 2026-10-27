@@ -324,7 +324,12 @@ public:
         const bool had_hint = previous_hint != nullptr;
         if (!had_hint) SDL_SetHint(output_hint, "1");
 #endif
-        device_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+        // Keep the requested PCM format/rate, but accept the actual device
+        // period. Otherwise SDL hides a larger native period behind a second
+        // stream, pulls several requested chunks in a burst, and leaves the
+        // realtime mixer pacing against an undersized reserve (e.g. 2048 vs
+        // 4096 frames on OHAudio/offload devices).
+        device_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, SDL_AUDIO_ALLOW_SAMPLES_CHANGE);
 #if defined(__OHOS__)
         if (!had_hint) SDL_ResetHint(output_hint);
 #endif
@@ -348,7 +353,11 @@ public:
         const size_t capacity = std::max(size_t(have.size) * 16,
             size_t(have.freq) * bytes_per_frame * 2);
         for (auto& pcm : pcm_) pcm = std::make_unique<AudioRing<Uint8>>(capacity);
+#ifdef __OHOS__
+        SDL_Log("[audiosink] open want=%dHz fmt=0x%x samples=%u  have=%dHz "
+#else
         std::printf("[audiosink] open want=%dHz fmt=0x%x samples=%u  have=%dHz "
+#endif
                     "fmt=0x%x samples=%u size=%u target_frames=%zu\n",
                     want.freq, (unsigned)want.format, (unsigned)want.samples,
                     have.freq, (unsigned)have.format, (unsigned)have.samples,
